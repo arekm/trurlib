@@ -20,6 +20,7 @@ struct trurl_io {
     int   (*flush)(void *, FILE *);
     void  (*reset)(void *);
     int   (*destroy)(void*, FILE *);
+    void  (*free)(void *);      /* frees the state without ending the stream */
 };
 
 #define TRURL_IO_MODE_READ  1

@@ -279,5 +279,6 @@ struct trurl_io zstdio = {
     (int   (*)(void *, FILE *, const void *, size_t)) zstd_write,
     (int   (*)(void *, FILE *)) zstd_flush,
     (void  (*)(void *)) zstd_reset,
-    (int   (*)(void*, FILE *)) zstd_destroy
+    (int   (*)(void*, FILE *)) zstd_destroy,
+    (void  (*)(void *)) zstd_free
 };
