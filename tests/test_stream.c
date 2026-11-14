@@ -100,6 +100,41 @@ START_TEST(test_seek) {
 }
 END_TEST
 
+/* for a name that does not say how the file is compressed, the type given
+   decides; the data is written that way and read back */
+static void do_test_open_type(int type, const unsigned char *magic)
+{
+    const char *path = NTEST_TMPPATH("nstream-type.dat");
+    unsigned char head[2];
+    char buf[16];
+    tn_stream *st;
+    FILE *f;
+
+    st = n_stream_open(path, "w", type);
+    fail_if(st == NULL, "cannot create %s", path);
+    expect_int(n_stream_write(st, "0123456789", 10), 10);
+    n_stream_close(st);
+
+    f = fopen(path, "r");
+    fail_if(f == NULL, "cannot open %s", path);
+    expect_int(fread(head, 1, sizeof(head), f), sizeof(head));
+    fclose(f);
+    fail_if(memcmp(head, magic, sizeof(head)) != 0, "type %d: written in another format", type);
+
+    st = n_stream_open(path, "r", type);
+    fail_if(st == NULL, "cannot open %s", path);
+    expect_int(n_stream_read(st, buf, sizeof(buf)), 10);
+    expect_int(memcmp(buf, "0123456789", 10), 0);
+    n_stream_close(st);
+}
+
+START_TEST(test_open_type)
+{
+    do_test_open_type(TN_STREAM_GZIO, (const unsigned char *) "\x1f\x8b");
+    do_test_open_type(TN_STREAM_ZSTDIO, (const unsigned char *) "\x28\xb5");
+}
+END_TEST
+
 
 /* n_stream_getline() returns one line at a time and grows its buffer when
    the line does not fit; a line that ends exactly at the buffer boundary
@@ -260,6 +295,7 @@ NTEST_RUNNER("nstream",
             test_open,
             test_read_write,
             test_seek,
+            test_open_type,
             test_stream_getline,
             test_printf_long,
             test_printf_format_error,
