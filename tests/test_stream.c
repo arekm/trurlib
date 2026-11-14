@@ -1,3 +1,6 @@
+#include <fcntl.h>
+#include <unistd.h>
+
 #include "n_check.h"
 #include "nmalloc.h"
 #include "nstream.h"
@@ -15,7 +18,7 @@ void do_test_read_write(const char *tmppath)
         int n = snprintf(buf, sizeof(buf), fmt, i);
         nw += n_stream_write(io, buf, n);
     }
-    n_stream_close(io);
+    expect_int(n_stream_close(io), 0);
 
     io = n_stream_open(tmppath, "r", TN_STREAM_UNKNOWN);
     for (i = 0; i < nitems; i++) {
@@ -241,6 +244,27 @@ static void do_test_printf_format_error(const char *path)
     n_stream_close(st);
 }
 
+/* a close that cannot write what is left in the buffers fails */
+static void do_test_close_error(int type)
+{
+    int fd = open("/dev/full", O_WRONLY);
+    tn_stream *st;
+
+    fail_if(fd == -1, "cannot open /dev/full");
+    st = n_stream_dopen(fd, "w", type);
+    fail_if(st == NULL, "cannot open /dev/full as stream type %d", type);
+    expect_int(n_stream_write(st, "0123456789", 10), 10);
+    expect_int(n_stream_close(st), -1);
+}
+
+START_TEST(test_close_error)
+{
+    do_test_close_error(TN_STREAM_STDIO);
+    do_test_close_error(TN_STREAM_GZIO);
+    do_test_close_error(TN_STREAM_ZSTDIO);
+}
+END_TEST
+
 START_TEST(test_printf_format_error)
 {
     do_test_printf_format_error(NTEST_TMPPATH("nstream-printf-err.txt"));
@@ -299,4 +323,5 @@ NTEST_RUNNER("nstream",
             test_stream_getline,
             test_printf_long,
             test_printf_format_error,
+            test_close_error,
             test_printf_write_hook);
