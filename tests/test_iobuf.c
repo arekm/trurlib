@@ -463,6 +463,29 @@ START_TEST (test_dopen_without_zstd_stream)
 }
 END_TEST
 
+/* a backward seek that cannot get a new zstd stream fails the read */
+START_TEST (test_seek_back_without_zstd_stream)
+{
+    const char *path = NTEST_TMPPATH("niobuf-no-stream-seek.zst");
+    tn_iobuf *io = n_iobuf_open(path, "w");
+    char buf[16];
+
+    fail_if(io == NULL, "cannot create %s", path);
+    expect_int(n_iobuf_write(io, "0123456789", 10), 10);
+    expect_int(n_iobuf_close(io), 0);
+
+    io = n_iobuf_open(path, "r");
+    fail_if(io == NULL, "cannot open %s", path);
+    expect_int(n_iobuf_read(io, buf, 4), 4);
+    n_iobuf_seek(io, 0, SEEK_SET);
+
+    zstd_create_fails = 1;
+    expect_int(n_iobuf_read(io, buf, 4), -1);
+    zstd_create_fails = 0;
+    expect_int(n_iobuf_close(io), 0);
+}
+END_TEST
+
 /* an open that fails still says why */
 START_TEST (test_open_error_keeps_errno)
 {
@@ -478,4 +501,5 @@ NTEST_RUNNER("niobuf",test_read_write, test_seek, test_gets, test_read_error,
              test_close_write_error, test_close_flush_error,
              test_close_end_error, test_flush_after_write,
              test_open_without_zstd_stream, test_dopen_without_zstd_stream,
+             test_seek_back_without_zstd_stream,
              test_open_error_keeps_errno);

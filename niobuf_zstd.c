@@ -117,7 +117,7 @@ static void zstd_reset(struct zstd_state *st)
 
     st->inbuf.pos = st->inbuf.size = 0;
     st->outbuf.pos = st->outbuf.size = 0;
-    st->failed = 0;
+    st->failed = st->stream == NULL;    /* no stream to read with: reads fail */
 }
 
 static int fill_inbuf(struct zstd_state *st, FILE *file)
