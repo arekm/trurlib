@@ -89,6 +89,27 @@ START_TEST(test_snprintf)
 }
 END_TEST
 
+/* the result is what is in the buffer, also when vsnprintf() fails */
+START_TEST(test_snprintf_format_error)
+{
+    char buf[16];
+
+    /* the C locale has no multibyte form of U+0100 */
+    expect_int(n_snprintf(buf, sizeof(buf), "ab%ls", L"\x100"), 0);
+    expect_str(buf, "");
+}
+END_TEST
+
+/* nothing fits in no room, and nothing is written there */
+START_TEST(test_snprintf_size_zero)
+{
+    char buf[4] = "xyz";
+
+    expect_int(n_snprintf(buf, 0, "%s", "abc"), 0);
+    expect_str(buf, "xyz");
+}
+END_TEST
+
 
 START_TEST(test_str_strip_ws)
 {
@@ -121,4 +142,5 @@ END_TEST
 
 
 NTEST_RUNNER("str", test_strtokl, test_str_len, test_str_in, test_str_etokl, test_snprintf,
+             test_snprintf_format_error, test_snprintf_size_zero,
              test_str_strip_ws);

@@ -22,8 +22,15 @@ int n_vsnprintf(char *str, size_t size, const char *fmt, va_list ap)
 {
     int s;
 
+    if (size == 0)
+        return 0;
+
     s = vsnprintf(str, size, fmt, ap);
-    if (s < 0 || (unsigned)s >= size)
+    if (s < 0) {                /* str holds nothing to rely on then */
+        *str = '\0';
+        return 0;
+    }
+    if ((unsigned)s >= size)
         return size - 1;
     
     return s;
