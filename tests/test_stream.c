@@ -458,6 +458,9 @@ static void do_test_cut_not(const char *path)
 
 START_TEST(test_cut_read)
 {
+    /* gzip only at CUT_HALF: zlib and zlib-ng miss a cut at CUT_SIZE / 2 */
+    do_test_cut_read(NTEST_TMPPATH("nstream-cut.gz"), CUT_HALF);
+    do_test_cut_read(NTEST_TMPPATH("nstream-cut.ngz"), CUT_HALF);
     do_test_cut_read(NTEST_TMPPATH("nstream-cut.zst"), CUT_HALF);
     do_test_cut_read(NTEST_TMPPATH("nstream-cut.zst"), CUT_SIZE / 2);
 }
@@ -465,6 +468,10 @@ END_TEST
 
 START_TEST(test_cut_getline)
 {
+    do_test_cut_getline(NTEST_TMPPATH("nstream-cut-lines.gz"), 1);
+    do_test_cut_getline(NTEST_TMPPATH("nstream-cut-line.gz"), 0);
+    do_test_cut_getline(NTEST_TMPPATH("nstream-cut-lines.ngz"), 1);
+    do_test_cut_getline(NTEST_TMPPATH("nstream-cut-line.ngz"), 0);
     do_test_cut_getline(NTEST_TMPPATH("nstream-cut-lines.zst"), 1);
     do_test_cut_getline(NTEST_TMPPATH("nstream-cut-line.zst"), 0);
 }
@@ -472,12 +479,16 @@ END_TEST
 
 START_TEST(test_cut_seek)
 {
+    do_test_cut_seek(NTEST_TMPPATH("nstream-cut-seek.gz"));
+    do_test_cut_seek(NTEST_TMPPATH("nstream-cut-seek.ngz"));
     do_test_cut_seek(NTEST_TMPPATH("nstream-cut-seek.zst"));
 }
 END_TEST
 
 START_TEST(test_cut_not)
 {
+    do_test_cut_not(NTEST_TMPPATH("nstream-cut-not.gz"));
+    do_test_cut_not(NTEST_TMPPATH("nstream-cut-not.ngz"));
     do_test_cut_not(NTEST_TMPPATH("nstream-cut-not.zst"));
 }
 END_TEST
