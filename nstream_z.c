@@ -30,35 +30,70 @@
 
 #define ZLIB_TRACE 0
 
+/* what st->stream of a gzip stream points to */
+struct gz_stream {
+    gzFile gz;
+    int    cut;                 /* the file ended inside a gzip member */
+};
+
+static inline gzFile gz_of(void *stream)
+{
+    return ((struct gz_stream *) stream)->gz;
+}
+
+/* Z_BUF_ERROR: the file ended inside a gzip member; zlib clears it at
+   the next call and zlib-ng at a seek back, so it is kept here */
+static int note_cut(void *stream)
+{
+    struct gz_stream *gs = stream;
+    int err;
+
+    gzerror(gs->gz, &err);
+    if (err == Z_BUF_ERROR)
+        gs->cut = 1;
+    return gs->cut;
+}
+
 static int do_gz_read(void *stream, void *buf, size_t size)
 {
-    return gzread(stream, buf, size);
+    int n, cut;
+
+    if (size == 0)              /* gzread() would return an earlier error */
+        return 0;
+    n = gzread(gz_of(stream), buf, size);
+    cut = note_cut(stream);
+    return n == 0 && cut ? -1 : n;
 }
 
 static int do_gz_write(void *stream, const void *buf, size_t size)
 {
-    return gzwrite(stream, buf, size);
+    return gzwrite(gz_of(stream), buf, size);
 }
 
 static char *do_gz_gets(void *stream, char *buf, size_t size)
 {
-    return gzgets(stream, buf, size);
+    char *s = gzgets(gz_of(stream), buf, size);
+
+    note_cut(stream);
+    return s;
 }
 
 
 static int do_gz_flush(void *stream)
 {
-    return gzflush(stream, Z_FULL_FLUSH);
+    return gzflush(gz_of(stream), Z_FULL_FLUSH);
 }
 
 static long do_gz_tell(void *stream)
 {
-    return gztell(stream);
+    return gztell(gz_of(stream));
 }
 
 static int do_gz_getc(void *stream)
 {
-    register int c = gzgetc((gzFile)stream);
+    register int c = gzgetc(gz_of(stream));
+
+    note_cut(stream);
     if (c == -1)
         return EOF;
 
@@ -68,7 +103,7 @@ static int do_gz_getc(void *stream)
 #if HAVE_GZUNGETC               /* zlib >= 1.2.0.2 */
 static int do_gz_ungetc(int c, void *stream)
 {
-    register int cc = gzungetc(c, stream);
+    register int cc = gzungetc(c, gz_of(stream));
     if (cc == -1)
         return EOF;
     n_assert(cc == c);
@@ -84,7 +119,7 @@ static int gz_fseek_wrap(void *stream, long offset, int whence)
     int seek = 0;
     switch (whence) {
     case SEEK_CUR:
-        seek = gztell(stream) + offset;
+        seek = gztell(gz_of(stream)) + offset;
         break;
 
     case SEEK_SET:
@@ -100,17 +135,17 @@ static int gz_fseek_wrap(void *stream, long offset, int whence)
         break;
     }
 
-    if (seek < gztell(stream)) {
-        DBGF_F("%p backward from %lld => %ld (whence %d)\n", stream, gztell(stream), offset, whence);
+    if (seek < gztell(gz_of(stream))) {
+        DBGF_F("%p backward from %lld => %ld (whence %d)\n", stream, gztell(gz_of(stream)), offset, whence);
     }
 #endif
 
-    rc = gzseek(stream, off, whence);
+    rc = gzseek(gz_of(stream), off, whence);
 
 #if ZLIB_TRACE
     if (rc < 0) {
         int ec;
-        printf("zlib_fseek: %s\n", gzerror(stream, &ec));
+        printf("zlib_fseek: %s\n", gzerror(gz_of(stream), &ec));
     }
 #endif
 
@@ -122,24 +157,48 @@ static int gz_fseek_wrap(void *stream, long offset, int whence)
 
 void *do_gz_open(const char *path, const char *mode)
 {
-    gzFile gzstream;
+    struct gz_stream *gs = n_calloc(1, sizeof(*gs));
     errno = 0;
 
-    if ((gzstream = gzopen(path, mode)) == NULL) {
+    if ((gs->gz = gzopen(path, mode)) == NULL) {
         if (errno == 0) {
             if (Z_MEM_ERROR)
                 errno = ENOMEM;
             else
                 errno = EIO;
         }
+        free(gs);
+        return NULL;
     }
 
-    return gzstream;
+    return gs;
+}
+
+static void *do_gz_dopen(int fd, const char *mode)
+{
+    struct gz_stream *gs = n_calloc(1, sizeof(*gs));
+
+    if ((gs->gz = gzdopen(fd, mode)) == NULL) {
+        free(gs);
+        return NULL;
+    }
+
+    return gs;
+}
+
+static int do_gz_close(void *stream)
+{
+    int rc = gzclose(gz_of(stream));
+
+    if (rc == Z_OK && ((struct gz_stream *) stream)->cut)
+        rc = Z_BUF_ERROR;       /* zlib has forgotten it by now */
+    free(stream);
+    return rc;
 }
 
 void n_stream_zlib_init(tn_stream *st) {
     st->st_open  = do_gz_open;
-    st->st_dopen = (void *(*)(int, const char *))gzdopen;
+    st->st_dopen = do_gz_dopen;
     st->st_read  = do_gz_read;
     st->st_write = do_gz_write;
     st->st_gets  = do_gz_gets;
@@ -152,7 +211,7 @@ void n_stream_zlib_init(tn_stream *st) {
     st->st_seek  = gz_fseek_wrap;
     st->st_tell  = do_gz_tell;
     st->st_flush = do_gz_flush;
-    st->st_close = (int (*)(void*))gzclose;
+    st->st_close = do_gz_close;
 }
 
 #endif  /* HAVE_LIBZ */

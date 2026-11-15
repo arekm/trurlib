@@ -34,6 +34,8 @@ struct zstd_state {
     void          *bufdata;
 
     int            failed;      /* zstd.h: no use after an error until reset */
+    size_t         hint;        /* of ZSTD_decompressStream(), 0: no frame open */
+    int            cut;         /* the file ended inside a frame; kept for the close */
 };
 
 static ZSTD_CStream *zstd_new_c_stream(size_t *size) {
@@ -118,6 +120,7 @@ static void zstd_reset(struct zstd_state *st)
     st->inbuf.pos = st->inbuf.size = 0;
     st->outbuf.pos = st->outbuf.size = 0;
     st->failed = st->stream == NULL;    /* no stream to read with: reads fail */
+    st->hint = 0;
 }
 
 static int fill_inbuf(struct zstd_state *st, FILE *file)
@@ -142,20 +145,37 @@ int zstd_read(struct zstd_state *st, FILE *file, void *dest, size_t dsize)
 
     //DBGF("read.start %d %d\n", st->inbuf.pos, st->inbuf.size);
     while (output.pos < output.size) {
+        int eof = 0;
+
         //DBGF("read %d %d\n", st->inbuf.pos, st->inbuf.size);
         n_assert(st->inbuf.pos <= st->inbuf.size);
 
         if (st->inbuf.pos == st->inbuf.size) { /* empty or consumed */
-            if (fill_inbuf(st, file) == 0)     /* EOF */
-                break;
+            if (fill_inbuf(st, file) == 0) {
+                if (ferror(file)) {
+                    st->failed = 1;
+                    return output.pos > 0 ? (int) output.pos : -1;
+                }
+                if (st->hint == 0)             /* EOF between frames */
+                    break;
+                eof = 1;        /* with no input the decoder gives out what it holds */
+            }
         }
 
-	int n = ZSTD_decompressStream(st->stream, &output, &st->inbuf);
+        size_t pos = output.pos;
+	size_t n = ZSTD_decompressStream(st->stream, &output, &st->inbuf);
 	if (ZSTD_isError(n)) {
             fprintf(stderr, "ZSTD_decompressStream: %s\n", ZSTD_getErrorName(n));
             st->failed = 1;
 	    return -1;
 	}
+        st->hint = n;
+
+        if (eof && output.pos == pos && n > 0) { /* holds nothing, needs more */
+            fprintf(stderr, "ZSTD_decompressStream: unexpected end of file\n");
+            st->failed = st->cut = 1;
+            return output.pos > 0 ? (int) output.pos : -1;
+        }
     }
 
     return output.pos;
@@ -249,8 +269,10 @@ static void zstd_free(struct zstd_state *st)
 static int zstd_destroy(struct zstd_state *st, FILE *file)
 {
     if (st->mode == TRURL_IO_MODE_READ) {
+        int rc = st->cut ? -1 : 0;      /* what was read is not the whole stream */
+
         zstd_free(st);
-        return 0;
+        return rc;
     }
 
     if (zstd_flush(st, file) == -1) {   /* the frame is broken already */

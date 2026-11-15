@@ -1,4 +1,5 @@
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "n_check.h"
@@ -265,6 +266,233 @@ START_TEST(test_close_error)
 }
 END_TEST
 
+/* a read that fails returns -1, not the 0 of the end of the file; a read
+   of 0 bytes returns 0 */
+static void do_test_read_error(int type)
+{
+    const char *dir = NTEST_TMPPATH("nstream-read-error.d");
+    char buf[16];
+    tn_stream *st;
+    int fd;
+
+    mkdir(dir, 0700);
+    fd = open(dir, O_RDONLY);           /* read(2) on it fails with EISDIR */
+    fail_if(fd == -1, "cannot open %s", dir);
+    st = n_stream_dopen(fd, "r", type);
+    fail_if(st == NULL, "cannot open %s as stream type %d", dir, type);
+    expect_int(n_stream_read(st, buf, sizeof(buf)), -1);
+    expect_int(n_stream_read(st, buf, 0), 0);
+    n_stream_close(st);
+}
+
+START_TEST(test_read_error)
+{
+    do_test_read_error(TN_STREAM_STDIO);
+    do_test_read_error(TN_STREAM_GZIO);
+    do_test_read_error(TN_STREAM_ZSTDIO);
+}
+END_TEST
+
+/* The cut stream tests: a stream written in two halves with a flush
+   between them, cut at the flush, as a writer that crashed or ran out of
+   disk leaves it. Everything before the flush can be decoded, the end of
+   the stream is missing. With newlines 0 the data is one long line, so
+   n_stream_getline() reads it with getc. CUT_HALF puts the flush where no
+   block or buffer of a decoder ends, CUT_SIZE / 2 where many do. */
+#define CUT_SIZE (1024 * 1024)
+#define CUT_HALF (CUT_SIZE / 2 + 1000)
+static char cut_data[CUT_SIZE];
+
+static void fill_cut_data(int newlines)
+{
+    size_t n = 0;
+
+    while (n < CUT_SIZE) {
+        char line[64];
+        int len = snprintf(line, sizeof(line), "line %zu of the cut stream%c",
+                           n, newlines ? '\n' : ' ');
+        size_t left = CUT_SIZE - n;
+
+        memcpy(cut_data + n, line, (size_t) len < left ? (size_t) len : left);
+        n += len;
+    }
+}
+
+static size_t write_cut_stream(const char *path, int newlines, size_t half)
+{
+    tn_stream *st;
+    struct stat sb;
+
+    fill_cut_data(newlines);
+    st = n_stream_open(path, "w", TN_STREAM_UNKNOWN);
+    fail_if(st == NULL, "cannot create %s", path);
+    expect_int(n_stream_write(st, cut_data, half), half);
+    expect_int(n_stream_flush(st), 0);
+    fail_if(stat(path, &sb) != 0, "cannot stat %s", path);
+    expect_int(n_stream_write(st, cut_data + half, CUT_SIZE - half), CUT_SIZE - half);
+    expect_int(n_stream_close(st), 0);
+    fail_if(truncate(path, sb.st_size) != 0, "cannot cut %s", path);
+    return half;
+}
+
+/* reads with n_stream_read() up to the cut, checking what it gets */
+static size_t read_to_cut(tn_stream *st, const char *path, size_t from)
+{
+    char buf[4096];
+    size_t total = from;
+    int n;
+
+    while ((n = n_stream_read(st, buf, sizeof(buf))) > 0) {
+        fail_if(total + n > CUT_SIZE || memcmp(buf, cut_data + total, n) != 0,
+                "%s: not what was written, at %zu", path, total);
+        total += n;
+    }
+    expect_int(n, -1);
+    return total;
+}
+
+/* the data up to the cut, then -1, again on each read, and from the close */
+static void do_test_cut_read(const char *path, size_t half)
+{
+    tn_stream *st;
+    char buf[16];
+    size_t total;
+
+    write_cut_stream(path, 1, half);
+    st = n_stream_open(path, "r", TN_STREAM_UNKNOWN);
+    fail_if(st == NULL, "cannot open %s", path);
+    total = read_to_cut(st, path, 0);
+    fail_unless(total >= half, "%s: %zu of the %zu bytes before the cut",
+                path, total, half);
+    expect_int(n_stream_read(st, buf, 0), 0);
+    expect_int(n_stream_read(st, buf, sizeof(buf)), -1);
+    expect_int(n_stream_close(st), -1);
+}
+
+/* a cut met by n_stream_getline(), by gets or by getc, which cannot tell
+   it from the end of the file, is reported by the next n_stream_read() */
+static void do_test_cut_getline(const char *path, int newlines)
+{
+    size_t half = write_cut_stream(path, newlines, CUT_HALF), total = 0;
+    tn_stream *st = n_stream_open(path, "r", TN_STREAM_UNKNOWN);
+    char *line = NULL, buf[16];
+    size_t size = 0;
+    int n;
+
+    fail_if(st == NULL, "cannot open %s", path);
+    while ((n = n_stream_getline(st, &line, &size)) > 0) {
+        fail_if(total + n > CUT_SIZE || memcmp(line, cut_data + total, n) != 0,
+                "%s: not what was written, at %zu", path, total);
+        total += n;
+    }
+    fail_unless(total >= half, "%s: %zu of the %zu bytes before the cut",
+                path, total, half);
+    expect_int(n_stream_read(st, buf, sizeof(buf)), -1);
+    expect_int(n_stream_close(st), -1);
+    n_free(line);
+}
+
+/* after a seek back the data before the cut reads as before and the cut
+   is met again; a close before that still reports it */
+static void do_test_cut_seek(const char *path)
+{
+    tn_stream *st;
+    char buf[100];
+
+    write_cut_stream(path, 1, CUT_HALF);
+    st = n_stream_open(path, "r", TN_STREAM_UNKNOWN);
+    fail_if(st == NULL, "cannot open %s", path);
+    read_to_cut(st, path, 0);
+
+    fail_if(n_stream_seek(st, 0, SEEK_SET) == -1, "%s: seek back failed", path);
+    expect_int(n_stream_read(st, buf, sizeof(buf)), sizeof(buf));
+    expect_int(memcmp(buf, cut_data, sizeof(buf)), 0);
+    read_to_cut(st, path, sizeof(buf));
+
+    fail_if(n_stream_seek(st, 0, SEEK_SET) == -1, "%s: seek back failed", path);
+    expect_int(n_stream_read(st, buf, sizeof(buf)), sizeof(buf));
+    expect_int(n_stream_close(st), -1);
+
+    st = n_stream_open(path, "r", TN_STREAM_UNKNOWN);   /* past the cut */
+    fail_if(n_stream_seek(st, CUT_SIZE - 10, SEEK_SET) == -1, "%s: seek failed", path);
+    expect_int(n_stream_read(st, buf, sizeof(buf)), -1);
+    expect_int(n_stream_close(st), -1);
+}
+
+/* an empty file reads as an empty stream; so do two whole streams one
+   after the other, as one */
+static void do_test_cut_not(const char *path)
+{
+    size_t half = CUT_HALF, total = 0;
+    tn_stream *st;
+    struct stat sb;
+    char buf[4096];
+    int fd, n;
+
+    fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);  /* not even a header */
+    fail_if(fd == -1 || close(fd) != 0, "cannot create %s", path);
+    fail_if(stat(path, &sb) != 0 || sb.st_size != 0, "%s is not empty", path);
+    st = n_stream_open(path, "r", TN_STREAM_UNKNOWN);
+    fail_if(st == NULL, "cannot open %s", path);
+    expect_int(n_stream_read(st, buf, sizeof(buf)), 0);
+    expect_int(n_stream_close(st), 0);
+
+    fill_cut_data(1);
+    st = n_stream_open(path, "w", TN_STREAM_UNKNOWN);
+    expect_int(n_stream_write(st, cut_data, half), half);
+    expect_int(n_stream_close(st), 0);
+    st = n_stream_open(path, "a", TN_STREAM_UNKNOWN);
+    expect_int(n_stream_write(st, cut_data + half, CUT_SIZE - half), CUT_SIZE - half);
+    expect_int(n_stream_close(st), 0);
+
+    st = n_stream_open(path, "r", TN_STREAM_UNKNOWN);
+    while ((n = n_stream_read(st, buf, sizeof(buf))) > 0) {
+        fail_if(total + n > CUT_SIZE || memcmp(buf, cut_data + total, n) != 0,
+                "%s: not what was written, at %zu", path, total);
+        total += n;
+    }
+    expect_int(n, 0);
+    expect_int(total, CUT_SIZE);
+    expect_int(n_stream_close(st), 0);
+}
+
+START_TEST(test_cut_read)
+{
+    /* gzip only at CUT_HALF: zlib and zlib-ng miss a cut at CUT_SIZE / 2 */
+    do_test_cut_read(NTEST_TMPPATH("nstream-cut.gz"), CUT_HALF);
+    do_test_cut_read(NTEST_TMPPATH("nstream-cut.ngz"), CUT_HALF);
+    do_test_cut_read(NTEST_TMPPATH("nstream-cut.zst"), CUT_HALF);
+    do_test_cut_read(NTEST_TMPPATH("nstream-cut.zst"), CUT_SIZE / 2);
+}
+END_TEST
+
+START_TEST(test_cut_getline)
+{
+    do_test_cut_getline(NTEST_TMPPATH("nstream-cut-lines.gz"), 1);
+    do_test_cut_getline(NTEST_TMPPATH("nstream-cut-line.gz"), 0);
+    do_test_cut_getline(NTEST_TMPPATH("nstream-cut-lines.ngz"), 1);
+    do_test_cut_getline(NTEST_TMPPATH("nstream-cut-line.ngz"), 0);
+    do_test_cut_getline(NTEST_TMPPATH("nstream-cut-lines.zst"), 1);
+    do_test_cut_getline(NTEST_TMPPATH("nstream-cut-line.zst"), 0);
+}
+END_TEST
+
+START_TEST(test_cut_seek)
+{
+    do_test_cut_seek(NTEST_TMPPATH("nstream-cut-seek.gz"));
+    do_test_cut_seek(NTEST_TMPPATH("nstream-cut-seek.ngz"));
+    do_test_cut_seek(NTEST_TMPPATH("nstream-cut-seek.zst"));
+}
+END_TEST
+
+START_TEST(test_cut_not)
+{
+    do_test_cut_not(NTEST_TMPPATH("nstream-cut-not.gz"));
+    do_test_cut_not(NTEST_TMPPATH("nstream-cut-not.ngz"));
+    do_test_cut_not(NTEST_TMPPATH("nstream-cut-not.zst"));
+}
+END_TEST
+
 START_TEST(test_printf_format_error)
 {
     do_test_printf_format_error(NTEST_TMPPATH("nstream-printf-err.txt"));
@@ -324,4 +552,9 @@ NTEST_RUNNER("nstream",
             test_printf_long,
             test_printf_format_error,
             test_close_error,
+            test_read_error,
+            test_cut_read,
+            test_cut_getline,
+            test_cut_seek,
+            test_cut_not,
             test_printf_write_hook);

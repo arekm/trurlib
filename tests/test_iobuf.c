@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <zstd.h>
 
@@ -219,6 +220,46 @@ START_TEST (test_read_after_error)
     dup2(err, 2);
     close(err);
     expect_int(count_zstd_errors(errpath), 1);  /* not decompressed again */
+    n_iobuf_close(io);
+}
+END_TEST
+
+/* a stream cut short is reported once, as a decompression error is */
+START_TEST (test_cut_reported_once)
+{
+    const char *path = NTEST_TMPPATH("niobuf-cut.zst");
+    const char *errpath = NTEST_TMPPATH("niobuf-cut.err");
+    tn_iobuf *io;
+    struct stat sb;
+    char buf[32];
+    int fd, err;
+
+    io = n_iobuf_open(path, "w");
+    fail_if(io == NULL, "cannot create %s", path);
+    n_iobuf_write(io, "0123456789abcdef", 16);
+    expect_int(n_iobuf_flush(io), 0);
+    fail_if(stat(path, &sb) != 0, "cannot stat %s", path);
+    n_iobuf_write(io, "ghijklmnopqrstuv", 16);
+    n_iobuf_close(io);
+    fail_if(truncate(path, sb.st_size) != 0, "cannot cut %s", path);
+
+    io = n_iobuf_open(path, "r");
+    fail_if(io == NULL, "cannot open %s", path);
+    fflush(stderr);
+    err = dup(2);
+    fd = open(errpath, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    fail_if(err < 0 || fd < 0, "cannot redirect stderr to %s", errpath);
+    dup2(fd, 2);
+    close(fd);
+
+    expect_int(n_iobuf_read(io, buf, sizeof(buf)), 16);
+    expect_int(n_iobuf_read(io, buf, sizeof(buf)), -1);
+    expect_int(n_iobuf_read(io, buf, sizeof(buf)), -1);
+
+    fflush(stderr);
+    dup2(err, 2);
+    close(err);
+    expect_int(count_zstd_errors(errpath), 1);
     n_iobuf_close(io);
 }
 END_TEST
@@ -497,6 +538,7 @@ END_TEST
 
 NTEST_RUNNER("niobuf",test_read_write, test_seek, test_gets, test_read_error,
              test_read_error_after_seek, test_read_after_error,
+             test_cut_reported_once,
              test_seek_back_after_error, test_seek_past_end,
              test_close_write_error, test_close_flush_error,
              test_close_end_error, test_flush_after_write,
