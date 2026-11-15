@@ -5,9 +5,9 @@
 #include "n_hash_int.h"
 
 static inline
-int remove_bucket_ll(struct hash_bucket **tbl, const char *key,
-                     unsigned val, void **data)
+int remove_bucket_ll(tn_hash *ht, const char *key, unsigned val, void **data)
 {
+    struct hash_bucket **tbl = ht->table;
     struct hash_bucket *ptr, *last = NULL;
 
     n_assert (tbl[val] != NULL);
@@ -23,7 +23,10 @@ int remove_bucket_ll(struct hash_bucket **tbl, const char *key,
             else
                 tbl[val] = ptr->next;
 
-            free(ptr);
+            if (ht->na)
+                ht->na->na_free(ht->na, ptr);
+            else
+                free(ptr);
             return 1;
         }
     }
@@ -42,7 +45,7 @@ void *n_hash_remove(tn_hash *ht, const char *key)
     tbl = ht->table;
 
     if (tbl[khash] != NULL) {
-        if (remove_bucket_ll(tbl, key, khash, &ptr)) {
+        if (remove_bucket_ll(ht, key, khash, &ptr)) {
             ht->items--;
             return ptr;
         }
@@ -51,7 +54,7 @@ void *n_hash_remove(tn_hash *ht, const char *key)
 
     khash += shift;
     if (khash < ht->size && tbl[khash] != NULL) {
-        if (remove_bucket_ll(tbl, key, khash, &ptr)) {
+        if (remove_bucket_ll(ht, key, khash, &ptr)) {
             ht->items--;
             return ptr;
         }
@@ -61,7 +64,7 @@ void *n_hash_remove(tn_hash *ht, const char *key)
     if (khash > shift) {
         khash -= shift;
         if (tbl[khash] != NULL) {
-            if (remove_bucket_ll(tbl, key, khash, &ptr)) {
+            if (remove_bucket_ll(ht, key, khash, &ptr)) {
                 ht->items--;
                 return ptr;
             }

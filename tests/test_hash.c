@@ -461,8 +461,75 @@ START_TEST(test_alloc_str_dedup_after_growth)
 }
 END_TEST
 
+static int nfreed;
+
+static void count_free(void *ptr)
+{
+    nfreed++;
+    free(ptr);
+}
+
+/* what goes back to an allocator made by counting_alloc() */
+static int na_nfreed;
+static void (*na_free_orig)(tn_alloc *, void *);
+
+static void count_na_free(tn_alloc *na, void *ptr)
+{
+    na_nfreed++;
+    na_free_orig(na, ptr);
+}
+
+static tn_alloc *counting_alloc(unsigned int flags)
+{
+    tn_alloc *na = n_alloc_new(4, flags);
+
+    na_free_orig = na->na_free;
+    na->na_free = count_na_free;
+    na_nfreed = 0;
+    return na;
+}
+
+/* malloc first: under UBSan, an obstack's misaligned blocks end a test */
+static const struct {
+    unsigned int flags;
+    const char *name;
+} alloc_kinds[] = {
+    { TN_ALLOC_MALLOC, "malloc" },
+    { TN_ALLOC_OBSTACK, "obstack" },
+};
+
+#define NALLOC_KINDS (int)(sizeof(alloc_kinds) / sizeof(alloc_kinds[0]))
+
+/* a node removed from a hash on an allocator goes back to it */
+START_TEST(test_hash_remove_allocator)
+{
+    for (int k = 0; k < NALLOC_KINDS; k++) {
+        const char *kind = alloc_kinds[k].name;
+        tn_alloc *na = counting_alloc(alloc_kinds[k].flags);
+        tn_hash *h = n_hash_new_na(na, 4, count_free);
+        char key[16], *v;
+
+        for (int i = 0; i < 8; i++) {
+            snprintf(key, sizeof(key), "key%02d", i);
+            n_hash_insert(h, key, strdup(key));
+        }
+
+        v = n_hash_remove(h, "key00");
+        fail_unless(v && strcmp(v, "key00") == 0, "%s: removed %s", kind, v);
+        free(v);
+        fail_unless(n_hash_size(h) == 7, "%s: %d values left", kind, n_hash_size(h));
+        fail_if(n_hash_exists(h, "key00"), "%s: key00 still there", kind);
+        fail_unless(na_nfreed == 1, "%s: %d nodes back to the allocator", kind, na_nfreed);
+
+        n_hash_free(h);
+        n_alloc_free(na);
+    }
+}
+END_TEST
+
 NTEST_RUNNER("hash",
              test_hash_base,
+             test_hash_remove_allocator,
              test_hash_dup_flags,
              test_ohash_base,
              test_ohash_store,
