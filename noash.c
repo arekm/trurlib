@@ -781,7 +781,10 @@ void n_oash_clean(tn_oash *ht)
             if (ht->free_fn != NULL && de->data != NULL)
 		ht->free_fn(de->data);
 
-            n_free(de);
+            if (ht->na)
+                ht->na->na_free(ht->na, de);
+            else
+                n_free(de);
             ht->data[e->data_index] = NULL;
         }
     }

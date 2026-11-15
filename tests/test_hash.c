@@ -527,6 +527,36 @@ START_TEST(test_hash_remove_allocator)
 }
 END_TEST
 
+/* the entries of an ohash on an allocator go back to it when it is cleaned */
+START_TEST(test_ohash_clean_allocator)
+{
+    for (int k = 0; k < NALLOC_KINDS; k++) {
+        const char *kind = alloc_kinds[k].name;
+        tn_alloc *na = counting_alloc(alloc_kinds[k].flags);
+        tn_oash *h = n_oash_new_na(na, 16, count_free);
+        char key[16];
+
+        for (int i = 0; i < 8; i++) {
+            snprintf(key, sizeof(key), "key%02d", i);
+            n_oash_insert(h, key, strdup(key));
+        }
+
+        nfreed = 0;
+        n_oash_clean(h);
+        fail_unless(nfreed == 8, "%s: %d values freed", kind, nfreed);
+        fail_unless(na_nfreed == 8, "%s: %d entries back to the allocator", kind, na_nfreed);
+        fail_unless(n_oash_size(h) == 0, "%s: %d values left", kind, n_oash_size(h));
+        fail_if(n_oash_exists(h, "key07"), "%s: key07 still there", kind);
+
+        n_oash_insert(h, "key07", strdup("key07"));
+        fail_unless(n_oash_size(h) == 1, "%s: %d values after an insert", kind, n_oash_size(h));
+
+        n_oash_free(h);
+        n_alloc_free(na);
+    }
+}
+END_TEST
+
 NTEST_RUNNER("hash",
              test_hash_base,
              test_hash_remove_allocator,
@@ -536,5 +566,6 @@ NTEST_RUNNER("hash",
              test_ohash_zero_hash_key,
              test_ohash_dup,
              test_ohash_dup_allocator,
+             test_ohash_clean_allocator,
              test_alloc_str_dedup_after_growth
            )
