@@ -548,6 +548,41 @@ START_TEST(test_hash_free_allocator)
 }
 END_TEST
 
+/* 32 keys in 4 slots: each slot holds a chain of them */
+START_TEST(test_hash_clean_chained)
+{
+    /* without an allocator, then on each kind of one */
+    for (int k = -1; k < NALLOC_KINDS; k++) {
+        const char *kind = k < 0 ? "no allocator" : alloc_kinds[k].name;
+        tn_alloc *na = k < 0 ? NULL : counting_alloc(alloc_kinds[k].flags);
+        tn_hash *h = na ? n_hash_new_na(na, 4, count_free) : n_hash_new(4, count_free);
+        char key[16];
+        int n = 32;
+
+        for (int i = 0; i < n; i++) {
+            snprintf(key, sizeof(key), "key%02d", i);
+            n_hash_insert(h, key, strdup(key));
+        }
+
+        nfreed = 0;
+        na_nfreed = 0;
+        n_hash_clean(h);
+        fail_unless(nfreed == n, "%s: %d values freed", kind, nfreed);
+        if (na)
+            fail_unless(na_nfreed == n, "%s: %d nodes back to the allocator", kind, na_nfreed);
+        fail_unless(n_hash_size(h) == 0, "%s: %d values left", kind, n_hash_size(h));
+        fail_if(n_hash_exists(h, "key31"), "%s: key31 still there", kind);
+
+        n_hash_insert(h, "key31", strdup("key31"));
+        fail_unless(n_hash_size(h) == 1, "%s: %d values after an insert", kind, n_hash_size(h));
+
+        n_hash_free(h);
+        if (na)
+            n_alloc_free(na);
+    }
+}
+END_TEST
+
 /* the entries of an ohash on an allocator go back to it when it is cleaned */
 START_TEST(test_ohash_clean_allocator)
 {
@@ -607,6 +642,7 @@ NTEST_RUNNER("hash",
              test_hash_base,
              test_hash_remove_allocator,
              test_hash_free_allocator,
+             test_hash_clean_chained,
              test_hash_dup_flags,
              test_ohash_base,
              test_ohash_store,
