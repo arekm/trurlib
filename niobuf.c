@@ -47,34 +47,49 @@ static tn_iobuf *n_iobuf_new(int type, const char *mode)
     iobuf = n_calloc(1, sizeof(*iobuf));
     iobuf->mode = m;
     iobuf->io = &zstdio;
-    iobuf->iostate = iobuf->io->new(m);
+    if ((iobuf->iostate = iobuf->io->new(m)) == NULL) {
+        free(iobuf);
+        return NULL;
+    }
 
     return iobuf;
 }
 
+static void n_iobuf_free(tn_iobuf *iobuf)
+{
+    iobuf->io->free(iobuf->iostate);
+    free(iobuf);
+}
+
+/* the zstd stream comes first: an open that cannot get one leaves the file
+   untouched and the descriptor open, as a failed fdopen() does */
 tn_iobuf *n_iobuf_open(const char *path, const char *mode)
 {
-    FILE *stream = fopen(path, mode);
+    tn_iobuf *iobuf = n_iobuf_new(TN_STREAM_ZSTDIO, mode);
 
-    if (stream == NULL)
+    if (iobuf == NULL)
         return NULL;
 
-    tn_iobuf *iobuf = n_iobuf_new(TN_STREAM_ZSTDIO, mode);
-    iobuf->stream = stream;
-    iobuf->fd = fileno(stream);
+    if ((iobuf->stream = fopen(path, mode)) == NULL) {
+        n_iobuf_free(iobuf);
+        return NULL;
+    }
+    iobuf->fd = fileno(iobuf->stream);
 
     return iobuf;
 }
 
 tn_iobuf *n_iobuf_dopen(int fd, const char *mode)
 {
-    FILE *stream = fdopen(fd, mode);
+    tn_iobuf *iobuf = n_iobuf_new(TN_STREAM_ZSTDIO, mode);
 
-    if (stream == NULL)
+    if (iobuf == NULL)
         return NULL;
 
-    tn_iobuf *iobuf = n_iobuf_new(TN_STREAM_ZSTDIO, mode);
-    iobuf->stream = stream;
+    if ((iobuf->stream = fdopen(fd, mode)) == NULL) {
+        n_iobuf_free(iobuf);
+        return NULL;
+    }
     iobuf->fd = fd;
 
     return iobuf;

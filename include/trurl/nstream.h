@@ -156,12 +156,16 @@ int n_stream_flush(tn_stream *st) {
     return st->st_flush(st->stream);
 }
 
+/* 0, or -1 when closing failed: what was written may not be in the file */
 static inline
-void n_stream_close(tn_stream *st) {
-    if (st->stream)
-        st->st_close(st->stream);
+int n_stream_close(tn_stream *st) {
+    int rc = 0;
+
+    if (st->stream && st->st_close(st->stream) != 0)
+        rc = -1;
     st->stream = NULL;
     free(st);
+    return rc;
 }
 
 int n_stream_guess_type(const char *path);

@@ -160,8 +160,10 @@ tn_stream *n_stream_open(const char *path, const char *mode, int type)
 {
     tn_stream *st;
     void *stream;
+    int guessed = n_stream_guess_type(path);
 
-    type = n_stream_guess_type(path);
+    if (type == TN_STREAM_UNKNOWN || guessed != TN_STREAM_STDIO)
+        type = guessed;         /* a .gz, .zst or .ngz name decides */
 
     if ((st = n_stream_new(type)) == NULL)
         return NULL;

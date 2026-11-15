@@ -117,7 +117,7 @@ static void zstd_reset(struct zstd_state *st)
 
     st->inbuf.pos = st->inbuf.size = 0;
     st->outbuf.pos = st->outbuf.size = 0;
-    st->failed = 0;
+    st->failed = st->stream == NULL;    /* no stream to read with: reads fail */
 }
 
 static int fill_inbuf(struct zstd_state *st, FILE *file)
@@ -279,5 +279,6 @@ struct trurl_io zstdio = {
     (int   (*)(void *, FILE *, const void *, size_t)) zstd_write,
     (int   (*)(void *, FILE *)) zstd_flush,
     (void  (*)(void *)) zstd_reset,
-    (int   (*)(void*, FILE *)) zstd_destroy
+    (int   (*)(void*, FILE *)) zstd_destroy,
+    (void  (*)(void *)) zstd_free
 };

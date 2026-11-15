@@ -1,3 +1,6 @@
+#include <fcntl.h>
+#include <unistd.h>
+
 #include "n_check.h"
 #include "nmalloc.h"
 #include "nstream.h"
@@ -15,7 +18,7 @@ void do_test_read_write(const char *tmppath)
         int n = snprintf(buf, sizeof(buf), fmt, i);
         nw += n_stream_write(io, buf, n);
     }
-    n_stream_close(io);
+    expect_int(n_stream_close(io), 0);
 
     io = n_stream_open(tmppath, "r", TN_STREAM_UNKNOWN);
     for (i = 0; i < nitems; i++) {
@@ -97,6 +100,41 @@ START_TEST(test_seek) {
     do_test_seek(NTEST_TMPPATH("nstream-seek.txt"));
     do_test_seek(NTEST_TMPPATH("nstream-seek.gz"));
     do_test_seek(NTEST_TMPPATH("nstream-seek.zst"));
+}
+END_TEST
+
+/* for a name that does not say how the file is compressed, the type given
+   decides; the data is written that way and read back */
+static void do_test_open_type(int type, const unsigned char *magic)
+{
+    const char *path = NTEST_TMPPATH("nstream-type.dat");
+    unsigned char head[2];
+    char buf[16];
+    tn_stream *st;
+    FILE *f;
+
+    st = n_stream_open(path, "w", type);
+    fail_if(st == NULL, "cannot create %s", path);
+    expect_int(n_stream_write(st, "0123456789", 10), 10);
+    n_stream_close(st);
+
+    f = fopen(path, "r");
+    fail_if(f == NULL, "cannot open %s", path);
+    expect_int(fread(head, 1, sizeof(head), f), sizeof(head));
+    fclose(f);
+    fail_if(memcmp(head, magic, sizeof(head)) != 0, "type %d: written in another format", type);
+
+    st = n_stream_open(path, "r", type);
+    fail_if(st == NULL, "cannot open %s", path);
+    expect_int(n_stream_read(st, buf, sizeof(buf)), 10);
+    expect_int(memcmp(buf, "0123456789", 10), 0);
+    n_stream_close(st);
+}
+
+START_TEST(test_open_type)
+{
+    do_test_open_type(TN_STREAM_GZIO, (const unsigned char *) "\x1f\x8b");
+    do_test_open_type(TN_STREAM_ZSTDIO, (const unsigned char *) "\x28\xb5");
 }
 END_TEST
 
@@ -206,6 +244,27 @@ static void do_test_printf_format_error(const char *path)
     n_stream_close(st);
 }
 
+/* a close that cannot write what is left in the buffers fails */
+static void do_test_close_error(int type)
+{
+    int fd = open("/dev/full", O_WRONLY);
+    tn_stream *st;
+
+    fail_if(fd == -1, "cannot open /dev/full");
+    st = n_stream_dopen(fd, "w", type);
+    fail_if(st == NULL, "cannot open /dev/full as stream type %d", type);
+    expect_int(n_stream_write(st, "0123456789", 10), 10);
+    expect_int(n_stream_close(st), -1);
+}
+
+START_TEST(test_close_error)
+{
+    do_test_close_error(TN_STREAM_STDIO);
+    do_test_close_error(TN_STREAM_GZIO);
+    do_test_close_error(TN_STREAM_ZSTDIO);
+}
+END_TEST
+
 START_TEST(test_printf_format_error)
 {
     do_test_printf_format_error(NTEST_TMPPATH("nstream-printf-err.txt"));
@@ -260,7 +319,9 @@ NTEST_RUNNER("nstream",
             test_open,
             test_read_write,
             test_seek,
+            test_open_type,
             test_stream_getline,
             test_printf_long,
             test_printf_format_error,
+            test_close_error,
             test_printf_write_hook);

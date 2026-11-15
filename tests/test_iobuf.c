@@ -398,9 +398,108 @@ START_TEST (test_flush_after_write)
 }
 END_TEST
 
+/* stand-ins: while set, zstd cannot make a stream, as with no memory for it */
+static int zstd_create_fails = 0;
 
-NTEST_RUNNER("niobuf", test_read_write, test_seek, test_gets, test_read_error,
+ZSTD_CStream *ZSTD_createCStream(void)
+{
+    static ZSTD_CStream *(*real_create)(void);
+
+    if (zstd_create_fails)
+        return NULL;
+    if (real_create == NULL)
+        real_create = (ZSTD_CStream *(*)(void)) dlsym(RTLD_NEXT, "ZSTD_createCStream");
+    return real_create();
+}
+
+ZSTD_DStream *ZSTD_createDStream(void)
+{
+    static ZSTD_DStream *(*real_create)(void);
+
+    if (zstd_create_fails)
+        return NULL;
+    if (real_create == NULL)
+        real_create = (ZSTD_DStream *(*)(void)) dlsym(RTLD_NEXT, "ZSTD_createDStream");
+    return real_create();
+}
+
+/* an open that cannot get a zstd stream fails, and leaves the file as it was */
+START_TEST (test_open_without_zstd_stream)
+{
+    const char *path = NTEST_TMPPATH("niobuf-no-stream.zst");
+    tn_iobuf *io;
+    char buf[16];
+
+    io = n_iobuf_open(path, "w");
+    fail_if(io == NULL, "cannot create %s", path);
+    expect_int(n_iobuf_write(io, "0123456789", 10), 10);
+    expect_int(n_iobuf_close(io), 0);
+
+    zstd_create_fails = 1;
+    expect_null(n_iobuf_open(path, "w"));
+    expect_null(n_iobuf_open(path, "r"));
+    zstd_create_fails = 0;
+
+    io = n_iobuf_open(path, "r");
+    fail_if(io == NULL, "cannot open %s", path);
+    expect_int(n_iobuf_read(io, buf, sizeof(buf)), 10);
+    expect_int(n_iobuf_close(io), 0);
+}
+END_TEST
+
+/* a dopen that cannot get a zstd stream fails, and the descriptor stays
+   open for the caller to close, as when fdopen() fails */
+START_TEST (test_dopen_without_zstd_stream)
+{
+    const char *path = NTEST_TMPPATH("niobuf-no-stream-fd.zst");
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+
+    fail_if(fd == -1, "cannot create %s", path);
+    zstd_create_fails = 1;
+    expect_null(n_iobuf_dopen(fd, "w"));
+    zstd_create_fails = 0;
+    fail_if(fcntl(fd, F_GETFD) == -1, "descriptor closed");
+    close(fd);
+}
+END_TEST
+
+/* a backward seek that cannot get a new zstd stream fails the read */
+START_TEST (test_seek_back_without_zstd_stream)
+{
+    const char *path = NTEST_TMPPATH("niobuf-no-stream-seek.zst");
+    tn_iobuf *io = n_iobuf_open(path, "w");
+    char buf[16];
+
+    fail_if(io == NULL, "cannot create %s", path);
+    expect_int(n_iobuf_write(io, "0123456789", 10), 10);
+    expect_int(n_iobuf_close(io), 0);
+
+    io = n_iobuf_open(path, "r");
+    fail_if(io == NULL, "cannot open %s", path);
+    expect_int(n_iobuf_read(io, buf, 4), 4);
+    n_iobuf_seek(io, 0, SEEK_SET);
+
+    zstd_create_fails = 1;
+    expect_int(n_iobuf_read(io, buf, 4), -1);
+    zstd_create_fails = 0;
+    expect_int(n_iobuf_close(io), 0);
+}
+END_TEST
+
+/* an open that fails still says why */
+START_TEST (test_open_error_keeps_errno)
+{
+    errno = 0;
+    expect_null(n_iobuf_open(NTEST_TMPPATH("no-such-dir/x.zst"), "r"));
+    expect_int(errno, ENOENT);
+}
+END_TEST
+
+NTEST_RUNNER("niobuf",test_read_write, test_seek, test_gets, test_read_error,
              test_read_error_after_seek, test_read_after_error,
              test_seek_back_after_error, test_seek_past_end,
              test_close_write_error, test_close_flush_error,
-             test_close_end_error, test_flush_after_write);
+             test_close_end_error, test_flush_after_write,
+             test_open_without_zstd_stream, test_dopen_without_zstd_stream,
+             test_seek_back_without_zstd_stream,
+             test_open_error_keeps_errno);
