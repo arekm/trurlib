@@ -527,6 +527,27 @@ START_TEST(test_hash_remove_allocator)
 }
 END_TEST
 
+/* a freed hash on an allocator gives it back its 8 nodes and itself */
+START_TEST(test_hash_free_allocator)
+{
+    for (int k = 0; k < NALLOC_KINDS; k++) {
+        const char *kind = alloc_kinds[k].name;
+        tn_alloc *na = counting_alloc(alloc_kinds[k].flags);
+        tn_hash *h = n_hash_new_na(na, 4, NULL);
+        char key[16];
+
+        for (int i = 0; i < 8; i++) {
+            snprintf(key, sizeof(key), "key%02d", i);
+            n_hash_insert(h, key, NULL);
+        }
+
+        n_hash_free(h);
+        fail_unless(na_nfreed == 9, "%s: %d blocks back to the allocator", kind, na_nfreed);
+        n_alloc_free(na);
+    }
+}
+END_TEST
+
 /* the entries of an ohash on an allocator go back to it when it is cleaned */
 START_TEST(test_ohash_clean_allocator)
 {
@@ -557,9 +578,35 @@ START_TEST(test_ohash_clean_allocator)
 }
 END_TEST
 
+/* an ohash on an allocator gives it back a removed entry, and when freed
+   the other 7 and itself */
+START_TEST(test_ohash_free_allocator)
+{
+    for (int k = 0; k < NALLOC_KINDS; k++) {
+        const char *kind = alloc_kinds[k].name;
+        tn_alloc *na = counting_alloc(alloc_kinds[k].flags);
+        tn_oash *h = n_oash_new_na(na, 16, NULL);
+        char key[16];
+
+        for (int i = 0; i < 8; i++) {
+            snprintf(key, sizeof(key), "key%02d", i);
+            n_oash_insert(h, key, NULL);
+        }
+
+        n_oash_remove(h, "key00");
+        fail_unless(na_nfreed == 1, "%s: %d entries back after a remove", kind, na_nfreed);
+
+        n_oash_free(h);
+        fail_unless(na_nfreed == 9, "%s: %d blocks back to the allocator", kind, na_nfreed);
+        n_alloc_free(na);
+    }
+}
+END_TEST
+
 NTEST_RUNNER("hash",
              test_hash_base,
              test_hash_remove_allocator,
+             test_hash_free_allocator,
              test_hash_dup_flags,
              test_ohash_base,
              test_ohash_store,
@@ -567,5 +614,6 @@ NTEST_RUNNER("hash",
              test_ohash_dup,
              test_ohash_dup_allocator,
              test_ohash_clean_allocator,
+             test_ohash_free_allocator,
              test_alloc_str_dedup_after_growth
            )
