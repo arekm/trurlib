@@ -4,8 +4,7 @@
 
 #include "n_hash_int.h"
 
-static
-void free_slot(struct hash_bucket *node, tn_hash *ht)
+void n_hash_free_chain(tn_hash *ht, struct hash_bucket *node)
 {
     register struct hash_bucket *next_node;
 
@@ -39,7 +38,7 @@ void n_hash_free(tn_hash *ht)
     
     for (i = 0; i < ht->size; i++) {
         if (ht->table[i])
-            free_slot(ht->table[i], ht);
+            n_hash_free_chain(ht, ht->table[i]);
     }
 
     free(ht->table);

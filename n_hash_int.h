@@ -65,6 +65,9 @@ struct trurl_hash_table {
 struct hash_bucket *n_hash_get_bucket(const tn_hash *ht,
                                       const char *key, int klen, unsigned val);
 
+/* frees the values of a chain of nodes, then the nodes */
+void n_hash_free_chain(tn_hash *ht, struct hash_bucket *node);
+
 int n_hash_exists_ex(const tn_hash *ht, const char *key, int *klen,
                      unsigned *khash);
 
