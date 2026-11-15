@@ -1,4 +1,5 @@
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "n_check.h"
@@ -265,6 +266,33 @@ START_TEST(test_close_error)
 }
 END_TEST
 
+/* a read that fails returns -1, not the 0 of the end of the file; a read
+   of 0 bytes returns 0 */
+static void do_test_read_error(int type)
+{
+    const char *dir = NTEST_TMPPATH("nstream-read-error.d");
+    char buf[16];
+    tn_stream *st;
+    int fd;
+
+    mkdir(dir, 0700);
+    fd = open(dir, O_RDONLY);           /* read(2) on it fails with EISDIR */
+    fail_if(fd == -1, "cannot open %s", dir);
+    st = n_stream_dopen(fd, "r", type);
+    fail_if(st == NULL, "cannot open %s as stream type %d", dir, type);
+    expect_int(n_stream_read(st, buf, sizeof(buf)), -1);
+    expect_int(n_stream_read(st, buf, 0), 0);
+    n_stream_close(st);
+}
+
+START_TEST(test_read_error)
+{
+    do_test_read_error(TN_STREAM_STDIO);
+    do_test_read_error(TN_STREAM_GZIO);
+    do_test_read_error(TN_STREAM_ZSTDIO);
+}
+END_TEST
+
 START_TEST(test_printf_format_error)
 {
     do_test_printf_format_error(NTEST_TMPPATH("nstream-printf-err.txt"));
@@ -324,4 +352,5 @@ NTEST_RUNNER("nstream",
             test_printf_long,
             test_printf_format_error,
             test_close_error,
+            test_read_error,
             test_printf_write_hook);

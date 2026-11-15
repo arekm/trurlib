@@ -210,6 +210,9 @@ int n_iobuf_read(tn_iobuf *iobuf, void *buf, size_t size)
 {
     int n;
 
+    if (size == 0)
+        return 0;
+
     if (n_iobuf_real_seek(iobuf) < 0)   /* pending seek */
         return -1;
 

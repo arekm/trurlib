@@ -50,7 +50,11 @@ const char *trurl_default_libz()
 
 static int do_s_read(void *stream, void *buf, size_t size)
 {
-    return fread(buf, 1, size, stream);
+    size_t n = fread(buf, 1, size, stream);
+
+    if (n == 0 && size > 0 && ferror(stream))
+        return -1;
+    return n;
 }
 
 static int do_s_write(void *stream, const void *buf, size_t size)

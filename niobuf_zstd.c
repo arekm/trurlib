@@ -146,8 +146,13 @@ int zstd_read(struct zstd_state *st, FILE *file, void *dest, size_t dsize)
         n_assert(st->inbuf.pos <= st->inbuf.size);
 
         if (st->inbuf.pos == st->inbuf.size) { /* empty or consumed */
-            if (fill_inbuf(st, file) == 0)     /* EOF */
-                break;
+            if (fill_inbuf(st, file) == 0) {
+                if (ferror(file)) {
+                    st->failed = 1;
+                    return output.pos > 0 ? (int) output.pos : -1;
+                }
+                break;                         /* EOF */
+            }
         }
 
 	int n = ZSTD_decompressStream(st->stream, &output, &st->inbuf);

@@ -34,6 +34,8 @@
 
 static int do_ngz_read(void *stream, void *buf, size_t size)
 {
+    if (size == 0)              /* gzread() would return an earlier error */
+        return 0;
     return zng_gzread(stream, buf, size);
 }
 
