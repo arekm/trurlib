@@ -89,7 +89,7 @@ const char **n_str_tokl_n(const char *s, const char *delim, int *ntokens)
         if (tokens)
             *ntokens = n - 1;
         else
-            ntokens = 0;
+            *ntokens = 0;
     }
 
     return (const char **) tokens;

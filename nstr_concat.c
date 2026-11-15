@@ -31,31 +31,29 @@
 
 char *n_str_vconcat(const char *s, va_list ap)
 {
+    va_list local_ap;
     char *p, *rstr;
-    va_list save_ap;
     int len;
 
     len = strlen(s);
 
-    __va_copy(save_ap, ap);
-
-    while ((p = va_arg(ap, char *)) != NULL) {	/* calculate length of args */
+    va_copy(local_ap, ap);
+    while ((p = va_arg(local_ap, char *)) != NULL) {	/* calculate length of args */
         len += strlen(p);
     }
+    va_end(local_ap);
 
     if ((rstr = n_malloc(len + 1)) == NULL)
         return NULL;
 
     strcpy(rstr, s);
 
-    __va_copy(ap, save_ap);
-    
-    while ((p = va_arg(ap, char *)) != NULL) {
+    va_copy(local_ap, ap);
+    while ((p = va_arg(local_ap, char *)) != NULL) {
         strcat(rstr, p);
     }
+    va_end(local_ap);
 
-    __va_copy(ap, save_ap);
-    
     return rstr;
 }
 

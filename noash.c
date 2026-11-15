@@ -922,7 +922,7 @@ int n_oash_dump(const tn_oash *ht)
 
         if (e && e->hash > 0) {
             unsigned diff = psldiff(ht, e, i);
-            printf("[%u] %u. h %u, psl %d (%d)%s: %s => %p\n", i, n, e->hash, e->psl, diff,
+            printf("[%u] %u. h %u, psl %d (%u)%s: %s => %p\n", i, n, e->hash, e->psl, diff,
                    diff != e->psl ? " DIFFER" : "", d->key, d->data);
             n++;
         } else {

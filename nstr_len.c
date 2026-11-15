@@ -30,19 +30,17 @@
 
 int n_str_vlen(const char *s, va_list ap)
 {
+    va_list local_ap;
     char *p;
-    va_list save_ap;
     int len;
     
     len = strlen(s);
     
-    __va_copy(save_ap, ap);
-
-    while ((p = va_arg(ap, char *)) != NULL) {	/* calculate length of args */
+    va_copy(local_ap, ap);
+    while ((p = va_arg(local_ap, char *)) != NULL) {	/* calculate length of args */
         len += strlen(p);
     }
-
-    __va_copy(ap, save_ap);
+    va_end(local_ap);
 
     return len;
 }
