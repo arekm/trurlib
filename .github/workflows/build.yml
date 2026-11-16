@@ -20,7 +20,7 @@ jobs:
     env:
       LANG: C
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     - name: git safe dir
       run: git config --global --add safe.directory $(pwd)
     - name: autogen
