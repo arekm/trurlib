@@ -7,6 +7,7 @@
 #ifndef TRURL_STREAM_H
 #define TRURL_STREAM_H
 
+#include <errno.h>
 #include <stdlib.h>
 
 #include <trurl/n2h.h>
@@ -114,11 +115,17 @@ int n_stream_read_uint32(tn_stream *st, uint32_t *val)
 
 static inline
 int n_stream_write(tn_stream *st, const void *buf, size_t size) {
+    int n;
+
     if (st->_write_hook)
         if (!st->_write_hook(buf, size, st->_write_hook_arg))
             return size;        /* fake write */
 
-    return st->st_write(st->stream, buf, size);
+    n = st->st_write(st->stream, buf, size);
+    if ((size_t)n != size && errno == 0)
+        errno = EIO;            /* gzwrite() reports failure without one */
+
+    return n;
 }
 
 static inline
@@ -171,6 +178,7 @@ int n_stream_close(tn_stream *st) {
 int n_stream_guess_type(const char *path);
 
 #include <trurl/n_snprintf.h>
+/* the number of bytes written, or -1 with errno set */
 int n_stream_vprintf(tn_stream *st, const char *fmt, va_list ap)
     TN_FORMAT_PRINTF(2, 0);
 int n_stream_printf(tn_stream *st, const char *fmt, ...) TN_FORMAT_PRINTF(2, 3);

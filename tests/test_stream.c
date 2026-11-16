@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -263,6 +264,70 @@ START_TEST(test_close_error)
     do_test_close_error(TN_STREAM_STDIO);
     do_test_close_error(TN_STREAM_GZIO);
     do_test_close_error(TN_STREAM_ZSTDIO);
+}
+END_TEST
+
+/* a write that fails during n_stream_printf(): the data neither compresses
+   nor fits in the streams' buffers, so the failure happens before the close */
+static void do_test_printf_write_error(int type)
+{
+    const size_t size = 4 * 1024 * 1024;
+    char *buf = n_malloc(size + 1);
+    unsigned x = 1;
+    tn_stream *st;
+    size_t i;
+    int fd = open("/dev/full", O_WRONLY);
+
+    fail_if(fd == -1, "cannot open /dev/full");
+    fail_if(buf == NULL, "cannot allocate %zu bytes", size + 1);
+    for (i = 0; i < size; i++) {
+        x = x * 1664525u + 1013904223u;
+        buf[i] = (char)((x >> 24) & 0xff);
+        if (buf[i] == '\0')
+            buf[i] = 'x';
+    }
+    buf[size] = '\0';
+
+    st = n_stream_dopen(fd, "w", type);
+    fail_if(st == NULL, "cannot open /dev/full as stream type %d", type);
+    errno = 0;
+    expect_int(n_stream_printf(st, "%s", buf), -1);
+    expect_int(errno, ENOSPC);
+    n_stream_close(st);
+    n_free(buf);
+}
+
+START_TEST(test_printf_write_error)
+{
+    do_test_printf_write_error(TN_STREAM_STDIO);
+    do_test_printf_write_error(TN_STREAM_GZIO);
+    do_test_printf_write_error(TN_STREAM_ZSTDIO);
+}
+END_TEST
+
+/* a backend that fails without an errno still leaves one for %m */
+static int write_nothing(void *stream, const void *buf, size_t size)
+{
+    (void) stream;
+    (void) buf;
+    (void) size;
+    return 0;
+}
+
+START_TEST(test_write_error_sets_errno)
+{
+    tn_stream st;
+
+    memset(&st, 0, sizeof(st));
+    st.st_write = write_nothing;
+
+    errno = 0;
+    expect_int(n_stream_write(&st, "abc", 3), 0);
+    expect_int(errno, EIO);
+
+    errno = 0;
+    expect_int(n_stream_printf(&st, "%s", "abc"), -1);
+    expect_int(errno, EIO);
 }
 END_TEST
 
@@ -552,6 +617,8 @@ NTEST_RUNNER("nstream",
             test_printf_long,
             test_printf_format_error,
             test_close_error,
+            test_printf_write_error,
+            test_write_error_sets_errno,
             test_read_error,
             test_cut_read,
             test_cut_getline,

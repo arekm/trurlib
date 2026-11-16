@@ -207,7 +207,7 @@ int n_stream_vprintf(tn_stream *st, const char *fmt, va_list args)
 {
     char     buf[1024 * 32], *p = buf;
     va_list  ap;
-    int      n;
+    int      n, nw, err = 0;
 
     va_copy(ap, args);
     n = vsnprintf(buf, sizeof(buf), fmt, ap);
@@ -222,11 +222,19 @@ int n_stream_vprintf(tn_stream *st, const char *fmt, va_list args)
         vsnprintf(p, (size_t) n + 1, fmt, args);
     }
 
-    n = n_stream_write(st, p, n);
+    nw = n_stream_write(st, p, n);
+    if (nw != n)
+        err = errno;
 
     if (p != buf)
         free(p);
-    return n;
+
+    if (nw != n) {
+        errno = err;
+        return -1;
+    }
+
+    return nw;
 }
 
 
