@@ -67,6 +67,16 @@ static char *do_s_gets(void *stream, char *buf, size_t size)
     return fgets(buf, size, stream);
 }
 
+/* fclose() does not report a read or a write that failed before it */
+static int do_s_close(void *stream)
+{
+    int failed = ferror(stream);
+
+    if (fclose(stream) != 0)
+        return EOF;
+    return failed ? EOF : 0;
+}
+
 static tn_stream *n_stream_new(int type)
 {
     tn_stream *st;
@@ -90,7 +100,7 @@ static tn_stream *n_stream_new(int type)
             st->st_seek  = (int (*)(void*, long, int))fseek;
             st->st_tell  = (long (*)(void*))ftell;
             st->st_flush = (int (*)(void*))fflush;
-            st->st_close = (int (*)(void*))fclose;
+            st->st_close = do_s_close;
             break;
 
         case TN_STREAM_GZIO:

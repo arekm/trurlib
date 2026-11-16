@@ -163,7 +163,8 @@ int n_stream_flush(tn_stream *st) {
     return st->st_flush(st->stream);
 }
 
-/* 0, or -1 when closing failed: what was written may not be in the file */
+/* 0, or -1 when closing or a read before it failed: what was written may
+   not be in the file, what was read may not be all of it */
 static inline
 int n_stream_close(tn_stream *st) {
     int rc = 0;
