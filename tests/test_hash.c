@@ -461,13 +461,195 @@ START_TEST(test_alloc_str_dedup_after_growth)
 }
 END_TEST
 
+static int nfreed;
+
+static void count_free(void *ptr)
+{
+    nfreed++;
+    free(ptr);
+}
+
+/* what goes back to an allocator made by counting_alloc() */
+static int na_nfreed;
+static void (*na_free_orig)(tn_alloc *, void *);
+
+static void count_na_free(tn_alloc *na, void *ptr)
+{
+    na_nfreed++;
+    na_free_orig(na, ptr);
+}
+
+static tn_alloc *counting_alloc(unsigned int flags)
+{
+    tn_alloc *na = n_alloc_new(4, flags);
+
+    na_free_orig = na->na_free;
+    na->na_free = count_na_free;
+    na_nfreed = 0;
+    return na;
+}
+
+/* malloc first: under UBSan, an obstack's misaligned blocks end a test */
+static const struct {
+    unsigned int flags;
+    const char *name;
+} alloc_kinds[] = {
+    { TN_ALLOC_MALLOC, "malloc" },
+    { TN_ALLOC_OBSTACK, "obstack" },
+};
+
+#define NALLOC_KINDS (int)(sizeof(alloc_kinds) / sizeof(alloc_kinds[0]))
+
+/* a node removed from a hash on an allocator goes back to it */
+START_TEST(test_hash_remove_allocator)
+{
+    for (int k = 0; k < NALLOC_KINDS; k++) {
+        const char *kind = alloc_kinds[k].name;
+        tn_alloc *na = counting_alloc(alloc_kinds[k].flags);
+        tn_hash *h = n_hash_new_na(na, 4, count_free);
+        char key[16], *v;
+
+        for (int i = 0; i < 8; i++) {
+            snprintf(key, sizeof(key), "key%02d", i);
+            n_hash_insert(h, key, strdup(key));
+        }
+
+        v = n_hash_remove(h, "key00");
+        fail_unless(v && strcmp(v, "key00") == 0, "%s: removed %s", kind, v);
+        free(v);
+        fail_unless(n_hash_size(h) == 7, "%s: %d values left", kind, n_hash_size(h));
+        fail_if(n_hash_exists(h, "key00"), "%s: key00 still there", kind);
+        fail_unless(na_nfreed == 1, "%s: %d nodes back to the allocator", kind, na_nfreed);
+
+        n_hash_free(h);
+        n_alloc_free(na);
+    }
+}
+END_TEST
+
+/* a freed hash on an allocator gives it back its 8 nodes and itself */
+START_TEST(test_hash_free_allocator)
+{
+    for (int k = 0; k < NALLOC_KINDS; k++) {
+        const char *kind = alloc_kinds[k].name;
+        tn_alloc *na = counting_alloc(alloc_kinds[k].flags);
+        tn_hash *h = n_hash_new_na(na, 4, NULL);
+        char key[16];
+
+        for (int i = 0; i < 8; i++) {
+            snprintf(key, sizeof(key), "key%02d", i);
+            n_hash_insert(h, key, NULL);
+        }
+
+        n_hash_free(h);
+        fail_unless(na_nfreed == 9, "%s: %d blocks back to the allocator", kind, na_nfreed);
+        n_alloc_free(na);
+    }
+}
+END_TEST
+
+/* 32 keys in 4 slots: each slot holds a chain of them */
+START_TEST(test_hash_clean_chained)
+{
+    /* without an allocator, then on each kind of one */
+    for (int k = -1; k < NALLOC_KINDS; k++) {
+        const char *kind = k < 0 ? "no allocator" : alloc_kinds[k].name;
+        tn_alloc *na = k < 0 ? NULL : counting_alloc(alloc_kinds[k].flags);
+        tn_hash *h = na ? n_hash_new_na(na, 4, count_free) : n_hash_new(4, count_free);
+        char key[16];
+        int n = 32;
+
+        for (int i = 0; i < n; i++) {
+            snprintf(key, sizeof(key), "key%02d", i);
+            n_hash_insert(h, key, strdup(key));
+        }
+
+        nfreed = 0;
+        na_nfreed = 0;
+        n_hash_clean(h);
+        fail_unless(nfreed == n, "%s: %d values freed", kind, nfreed);
+        if (na)
+            fail_unless(na_nfreed == n, "%s: %d nodes back to the allocator", kind, na_nfreed);
+        fail_unless(n_hash_size(h) == 0, "%s: %d values left", kind, n_hash_size(h));
+        fail_if(n_hash_exists(h, "key31"), "%s: key31 still there", kind);
+
+        n_hash_insert(h, "key31", strdup("key31"));
+        fail_unless(n_hash_size(h) == 1, "%s: %d values after an insert", kind, n_hash_size(h));
+
+        n_hash_free(h);
+        if (na)
+            n_alloc_free(na);
+    }
+}
+END_TEST
+
+/* the entries of an ohash on an allocator go back to it when it is cleaned */
+START_TEST(test_ohash_clean_allocator)
+{
+    for (int k = 0; k < NALLOC_KINDS; k++) {
+        const char *kind = alloc_kinds[k].name;
+        tn_alloc *na = counting_alloc(alloc_kinds[k].flags);
+        tn_oash *h = n_oash_new_na(na, 16, count_free);
+        char key[16];
+
+        for (int i = 0; i < 8; i++) {
+            snprintf(key, sizeof(key), "key%02d", i);
+            n_oash_insert(h, key, strdup(key));
+        }
+
+        nfreed = 0;
+        n_oash_clean(h);
+        fail_unless(nfreed == 8, "%s: %d values freed", kind, nfreed);
+        fail_unless(na_nfreed == 8, "%s: %d entries back to the allocator", kind, na_nfreed);
+        fail_unless(n_oash_size(h) == 0, "%s: %d values left", kind, n_oash_size(h));
+        fail_if(n_oash_exists(h, "key07"), "%s: key07 still there", kind);
+
+        n_oash_insert(h, "key07", strdup("key07"));
+        fail_unless(n_oash_size(h) == 1, "%s: %d values after an insert", kind, n_oash_size(h));
+
+        n_oash_free(h);
+        n_alloc_free(na);
+    }
+}
+END_TEST
+
+/* an ohash on an allocator gives it back a removed entry, and when freed
+   the other 7 and itself */
+START_TEST(test_ohash_free_allocator)
+{
+    for (int k = 0; k < NALLOC_KINDS; k++) {
+        const char *kind = alloc_kinds[k].name;
+        tn_alloc *na = counting_alloc(alloc_kinds[k].flags);
+        tn_oash *h = n_oash_new_na(na, 16, NULL);
+        char key[16];
+
+        for (int i = 0; i < 8; i++) {
+            snprintf(key, sizeof(key), "key%02d", i);
+            n_oash_insert(h, key, NULL);
+        }
+
+        n_oash_remove(h, "key00");
+        fail_unless(na_nfreed == 1, "%s: %d entries back after a remove", kind, na_nfreed);
+
+        n_oash_free(h);
+        fail_unless(na_nfreed == 9, "%s: %d blocks back to the allocator", kind, na_nfreed);
+        n_alloc_free(na);
+    }
+}
+END_TEST
+
 NTEST_RUNNER("hash",
              test_hash_base,
+             test_hash_remove_allocator,
+             test_hash_free_allocator,
+             test_hash_clean_chained,
              test_hash_dup_flags,
              test_ohash_base,
              test_ohash_store,
              test_ohash_zero_hash_key,
              test_ohash_dup,
              test_ohash_dup_allocator,
+             test_ohash_clean_allocator,
+             test_ohash_free_allocator,
              test_alloc_str_dedup_after_growth
            )

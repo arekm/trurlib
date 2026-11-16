@@ -222,7 +222,9 @@ void n_oash_free(tn_oash *ht)
                 ht->free_fn(de->data);
             }
 
-            if (!ht->na)
+            if (ht->na)
+                ht->na->na_free(ht->na, de);
+            else
                 n_free(de);
         }
     }
@@ -236,8 +238,12 @@ void n_oash_free(tn_oash *ht)
 
     if (ht->na == NULL)
         free(ht);
-    else
-        n_alloc_free(ht->na);
+    else {
+        tn_alloc *na = ht->na;
+
+        na->na_free(na, ht);
+        n_alloc_free(na);
+    }
 }
 
 static inline
@@ -737,7 +743,9 @@ void *n_oash_remove(tn_oash *ht, const char *key)
     ht->dsize--;
 
     void *data = de->data;
-    if (!ht->na)
+    if (ht->na)
+        ht->na->na_free(ht->na, de);
+    else
         n_free(de);
 
     ht->size -= 1;
@@ -781,7 +789,10 @@ void n_oash_clean(tn_oash *ht)
             if (ht->free_fn != NULL && de->data != NULL)
 		ht->free_fn(de->data);
 
-            n_free(de);
+            if (ht->na)
+                ht->na->na_free(ht->na, de);
+            else
+                n_free(de);
             ht->data[e->data_index] = NULL;
         }
     }
