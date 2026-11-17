@@ -19,12 +19,16 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "trurl_internal.h"
 #include "nassert.h"
 #include "nmalloc.h"
 #include "ndie.h"
 #include "niobuf.h"
+#include "nstr.h"
 #define TN_STREAM_USE_GZIO_NG 1
 #include "nstream.h"
 
@@ -42,6 +46,16 @@ void n_stream_zlib_ng_init(tn_stream *st);
 #ifdef HAVE_LIBZ
 void n_stream_zlib_init(tn_stream *st);
 #endif
+
+/* the bits of a type argument that hold the type itself */
+#define TN_STREAM_TYPE_MASK 0xff
+#define TN_STREAM_TYPE(t)   ((t) & TN_STREAM_TYPE_MASK)
+
+#define TMP_SUFFIX      ".tmpXXXXXX"
+#define TMP_SUFFIX_LEN  (sizeof(TMP_SUFFIX) - 1)
+
+static
+tn_stream *atomic_open(const char *path, const char *mode, int type, int flags);
 
 const char *trurl_default_libz()
 {
@@ -67,16 +81,15 @@ static char *do_s_gets(void *stream, char *buf, size_t size)
     return fgets(buf, size, stream);
 }
 
-static tn_stream *n_stream_new(int type)
+/* path_size leaves room for the temporary name an atomic stream keeps */
+static tn_stream *n_stream_new(int type, size_t path_size)
 {
     tn_stream *st;
 
-    st = n_malloc(sizeof(*st));
-    st->stream = NULL;
+    st = n_malloc(sizeof(*st) + path_size);
+    memset(st, 0, sizeof(*st));
     st->fd = -1;
-    st->type = type;
-    st->_write_hook = NULL;
-    st->_write_hook_arg = NULL;
+    st->type = (uint8_t)type;
 
     switch (type) {
         case TN_STREAM_STDIO:
@@ -129,8 +142,9 @@ static tn_stream *n_stream_new(int type)
 
         default:
             n_die("%d: unknown stream type\n", type);
-            n_assert(0);
-            break;
+            free(st);               /* a n_die() hook may let us return */
+            errno = EINVAL;
+            return NULL;
     }
 
     return st;
@@ -160,16 +174,46 @@ int n_stream_guess_type(const char *path)
     return type;
 }
 
-tn_stream *n_stream_open(const char *path, const char *mode, int type)
+/* a .gz, .zst or .ngz name decides, unless the caller named a compression
+   type and the path says nothing about it */
+static int stream_type(const char *path, int type)
 {
-    tn_stream *st;
-    void *stream;
     int guessed = n_stream_guess_type(path);
 
-    if (type == TN_STREAM_UNKNOWN || guessed != TN_STREAM_STDIO)
-        type = guessed;         /* a .gz, .zst or .ngz name decides */
+    type = TN_STREAM_TYPE(type);
 
-    if ((st = n_stream_new(type)) == NULL)
+    if (type == TN_STREAM_UNKNOWN || guessed != TN_STREAM_STDIO)
+        type = guessed;
+
+    return type;
+}
+
+tn_stream *n_stream_open(const char *path, const char *mode, int type)
+{
+    int flags;
+    tn_stream *st;
+    void *stream;
+
+    if (type == -1)             /* TN_STREAM_UNKNOWN was -1 before the flags */
+        type = TN_STREAM_UNKNOWN;
+
+    flags = type & ~TN_STREAM_TYPE_MASK;
+    type = stream_type(path, type);
+
+    if (flags & ~(TN_STREAM_ATOMIC | TN_STREAM_SYNC)) {
+        errno = EINVAL;         /* an unknown flag */
+        return NULL;
+    }
+
+    if ((flags & TN_STREAM_SYNC) && (flags & TN_STREAM_ATOMIC) == 0) {
+        errno = EINVAL;         /* there is no rename to make durable */
+        return NULL;
+    }
+
+    if (flags & TN_STREAM_ATOMIC)
+        return atomic_open(path, mode, type, flags);
+
+    if ((st = n_stream_new(type, 0)) == NULL)
         return NULL;
 
     if ((stream = st->st_open(path, mode))) {
@@ -187,7 +231,15 @@ tn_stream *n_stream_dopen(int fd, const char *mode, int type)
     tn_stream *st;
     void *stream;
 
-    if ((st = n_stream_new(type)) == NULL)
+    if (type == -1)             /* TN_STREAM_UNKNOWN was -1 before the flags */
+        type = TN_STREAM_UNKNOWN;
+
+    if (type & ~TN_STREAM_TYPE_MASK) {
+        errno = EINVAL;         /* no file name to rename the fd to */
+        return NULL;
+    }
+
+    if ((st = n_stream_new(type, 0)) == NULL)
         return NULL;
 
     if ((stream = st->st_dopen(fd, mode))) {
@@ -202,6 +254,217 @@ tn_stream *n_stream_dopen(int fd, const char *mode, int type)
     return st;
 }
 
+/* closes the stream's backend; 0, or -1 with errno set */
+static int stream_close(tn_stream *st)
+{
+    int err = 0;
+
+    if (st->stream && st->st_close(st->stream) != 0)
+        err = errno ? errno : EIO;
+    st->stream = NULL;
+
+    if (err) {
+        errno = err;
+        return -1;
+    }
+    return 0;
+}
+
+/* 0, or -1 with errno set; an already missing file is not an error */
+static int unlink_tmp(const char *path)
+{
+    if (unlink(path) == 0 || errno == ENOENT)
+        return 0;
+
+    return -1;
+}
+
+static int fsync_retry(int fd)
+{
+    int rc;
+
+    while ((rc = fsync(fd)) != 0 && errno == EINTR)
+        ;
+    return rc;
+}
+
+/* fsync the directory holding target; 0, or the errno of the failure */
+static int sync_dir(const char *target)
+{
+    char *dir = n_strdup(target);
+    const char *dirname = n_dirname(dir);
+    int fd, err = 0;
+
+    if (dirname == NULL)        /* no '/': the current directory */
+        dirname = ".";
+
+    else if (*dirname == '\0')
+        dirname = "/";
+
+    if ((fd = open(dirname, O_RDONLY | O_DIRECTORY)) < 0) {
+        err = errno;
+
+    } else {
+        if (fsync_retry(fd) != 0 && errno != EINVAL && errno != ENOTSUP)
+            err = errno;
+        close(fd);
+    }
+
+    free(dir);
+
+    return err;
+}
+
+/* fchmod, close and rename; on any failure the temporary file goes away and
+   the target keeps its old contents */
+static int atomic_close(tn_stream *st)
+{
+    int fd = -1, err = 0;
+
+    if (st->werr)               /* the write error is the one to report */
+        err = st->werr;
+    else if (fchmod(st->fd, st->mode) != 0)  /* 0600 while it was written */
+        err = errno;
+
+    /* the descriptor has to outlive st_close(), which writes the trailer of
+       a compressed stream and closes the original */
+    if (err == 0 && (st->flags & TN_STREAM_SYNC)) {
+        if ((fd = dup(st->fd)) < 0)
+            err = errno;
+    }
+
+    if (stream_close(st) != 0 && err == 0)
+        err = errno;
+
+    if (fd >= 0) {
+        if (err == 0 && fsync_retry(fd) != 0)
+            err = errno;
+        close(fd);
+    }
+
+    if (err == 0) {
+        size_t len = strlen(st->path);
+        n_assert(len > TMP_SUFFIX_LEN);
+        char *target = n_strdupl(st->path, len - TMP_SUFFIX_LEN);
+
+        if (rename(st->path, target) != 0)
+            err = errno;
+
+        /* in place now; a crash could still lose the rename */
+        else if (st->flags & TN_STREAM_SYNC)
+            err = sync_dir(target);
+        free(target);
+    }
+
+    if (err != 0) {
+        unlink_tmp(st->path);   /* the close error is the one to report */
+        errno = err;
+        return -1;
+    }
+
+    return 0;
+}
+
+int n_stream_close(tn_stream *st)
+{
+    int rc, err = 0;
+
+    if (st->flags & TN_STREAM_ATOMIC)
+        rc = atomic_close(st);
+    else
+        rc = stream_close(st);
+
+    if (rc != 0)
+        err = errno;
+
+    free(st);
+
+    if (rc != 0)
+        errno = err;
+    return rc;
+}
+
+int n_stream_abort(tn_stream *st)
+{
+    int err = 0;
+
+    if ((st->flags & TN_STREAM_ATOMIC) == 0) {
+        n_die("non-atomic stream cannot be aborted\n");
+        return n_stream_close(st);
+    }
+
+    if (stream_close(st) != 0)
+        err = errno;
+
+    if (unlink_tmp(st->path) != 0 && err == 0)
+        err = errno;
+
+    free(st);
+
+    if (err) {
+        errno = err;
+        return -1;
+    }
+    return 0;
+}
+
+/* what the replaced file had before, or what a new one gets from the umask */
+static mode_t atomic_mode(const char *path)
+{
+    struct stat sb;
+    mode_t mask;
+
+    if (stat(path, &sb) == 0 && S_ISREG(sb.st_mode))
+        return sb.st_mode & 0777;   /* neither the owner nor setuid is kept */
+
+    /* umask() is process-wide; the writers of a file are not expected to
+       create unrelated files at the same time */
+    mask = umask(0);
+    umask(mask);
+    return 0666 & ~mask;
+}
+
+static
+tn_stream *atomic_open(const char *path, const char *mode, int type, int flags)
+{
+    size_t len = strlen(path);
+    tn_stream *st;
+    int fd, err;
+
+    /* a read or an append stream would rename an empty file over the target */
+    if (*mode != 'w') {
+        errno = EINVAL;
+        return NULL;
+    }
+
+    if ((st = n_stream_new(type, len + TMP_SUFFIX_LEN + 1)) == NULL)
+        return NULL;
+
+    memcpy(st->path, path, len);
+    memcpy(st->path + len, TMP_SUFFIX, TMP_SUFFIX_LEN + 1);
+
+    if ((fd = mkstemp(st->path)) < 0) {
+        err = errno;
+        free(st);
+        errno = err;
+        return NULL;
+    }
+
+    if ((st->stream = st->st_dopen(fd, mode)) == NULL) {
+        err = errno;
+        close(fd);
+        unlink(st->path);
+        free(st);
+        errno = err;
+        return NULL;
+    }
+
+    st->fd = fd;
+    st->mode = atomic_mode(path);
+    st->flags |= (uint16_t)flags;
+
+    return st;
+}
 
 int n_stream_vprintf(tn_stream *st, const char *fmt, va_list args)
 {
@@ -236,7 +499,6 @@ int n_stream_vprintf(tn_stream *st, const char *fmt, va_list args)
 
     return nw;
 }
-
 
 int n_stream_printf(tn_stream *st, const char *fmt, ...)
 {
