@@ -1,7 +1,12 @@
+#ifdef HAVE_CONFIG_H
+# include "config.h"           /* _DEFAULT_SOURCE, for glob() and friends */
+#endif
+
 #include <errno.h>
 #include <fcntl.h>
 #include <glob.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 #include "n_check.h"
@@ -9,6 +14,25 @@
 #include "nmalloc.h"
 #include "nstream.h"
 #include "nstore.h"
+
+/* TN_STREAM_SYNC fsyncs the new file and then its directory; libtrurl
+   resolves fsync() through the executable's definition, so the test can
+   count the calls and fail one of them.  The real one is reached through
+   syscall(), as calling fsync() here would recurse. */
+static int fsync_calls;
+static int fsync_fail_at;       /* 1-based number of the call to fail */
+
+int fsync(int fd)
+{
+    fsync_calls++;
+
+    if (fsync_calls == fsync_fail_at) {
+        errno = EIO;
+        return -1;
+    }
+
+    return (int)syscall(SYS_fsync, fd);
+}
 
 void do_test_read_write(const char *tmppath)
 {
@@ -316,6 +340,19 @@ static int write_nothing(void *stream, const void *buf, size_t size)
     return 0;
 }
 
+static int flush_nothing(void *stream)
+{
+    (void) stream;
+    return EOF;
+}
+
+static int flush_fails(void *stream)
+{
+    (void) stream;
+    errno = ENOSPC;
+    return EOF;
+}
+
 START_TEST(test_write_error_sets_errno)
 {
     tn_stream st;
@@ -330,6 +367,38 @@ START_TEST(test_write_error_sets_errno)
 
     errno = 0;
     expect_int(n_stream_printf(&st, "%s", "abc"), -1);
+    expect_int(errno, EIO);
+    expect_int(st.werr, EIO);
+}
+END_TEST
+
+/* an explicitly flushed failure is a failed write too: a later atomic
+   close must not publish what was not written */
+START_TEST(test_flush_error_sets_errno)
+{
+    tn_stream st;
+
+    memset(&st, 0, sizeof(st));
+    st.st_flush = flush_fails;
+
+    errno = 0;
+    expect_int(n_stream_flush(&st), EOF);
+    expect_int(errno, ENOSPC);
+    expect_int(st.werr, ENOSPC);
+
+    /* the first error is the one the close reports */
+    st.st_write = write_nothing;
+    errno = 0;
+    expect_int(n_stream_write(&st, "abc", 3), 0);
+    expect_int(errno, EIO);
+    expect_int(st.werr, ENOSPC);
+
+    /* no errno from the backend, as gzflush() may do */
+    memset(&st, 0, sizeof(st));
+    st.st_flush = flush_nothing;
+
+    errno = 0;
+    expect_int(n_stream_flush(&st), EOF);
     expect_int(errno, EIO);
     expect_int(st.werr, EIO);
 }
@@ -448,6 +517,76 @@ START_TEST(test_atomic)
     expect_int(n_stream_close(st), 0);
     expect_content(tmpp, "kept");
     expect_int(tmp_files(tmpp), 0);
+}
+END_TEST
+
+START_TEST(test_atomic_sync)
+{
+    const char *plain = NTEST_TMPPATH("nstream-atomic-sync-plain.txt");
+    const char *gz = NTEST_TMPPATH("nstream-atomic-sync.gz");
+    const char *path = NTEST_TMPPATH("nstream-atomic-sync.txt");
+    tn_stream *st;
+
+    /* the flag is what makes the syncs: without it there are none */
+    unlink(plain);
+    fsync_calls = 0;
+    st = n_stream_open(plain, "w", TN_STREAM_ATOMIC);
+    fail_if(st == NULL, "cannot open %s atomically", plain);
+    expect_int(n_stream_write(st, "new", 3), 3);
+    expect_int(n_stream_close(st), 0);
+    expect_int(fsync_calls, 0);
+
+    unlink(plain);
+    fsync_calls = 0;
+    st = n_stream_open(plain, "w", TN_STREAM_ATOMIC | TN_STREAM_SYNC);
+    fail_if(st == NULL, "cannot open %s atomically and synchronously", plain);
+    expect_int(n_stream_write(st, "new", 3), 3);
+    expect_int(n_stream_close(st), 0);
+    expect_int(fsync_calls, 2); /* the file, then its directory */
+    expect_content(plain, "new");
+    expect_int(tmp_files(plain), 0);
+
+    /* a compressed stream writes its trailer in the close, so the fsync
+       must be done on a descriptor that outlives it */
+    unlink(gz);
+    fsync_calls = 0;
+    st = n_stream_open(gz, "w", TN_STREAM_ATOMIC | TN_STREAM_SYNC);
+    fail_if(st == NULL, "cannot open %s atomically and synchronously", gz);
+    expect_int(n_stream_write(st, "0123456789", 10), 10);
+    expect_int(n_stream_close(st), 0);
+    expect_int(fsync_calls, 2);
+    expect_content_type(gz, "0123456789", TN_STREAM_UNKNOWN);
+    expect_int(tmp_files(gz), 0);
+
+    /* the rename comes after the file's sync: when that sync fails the
+       target keeps its old contents */
+    write_content(path, "old");
+    fsync_calls = 0;
+    fsync_fail_at = 1;
+    st = n_stream_open(path, "w", TN_STREAM_ATOMIC | TN_STREAM_SYNC);
+    fail_if(st == NULL, "cannot open %s atomically and synchronously", path);
+    expect_int(n_stream_write(st, "new", 3), 3);
+    errno = 0;
+    expect_int(n_stream_close(st), -1);
+    expect_int(errno, EIO);
+    fsync_fail_at = 0;
+    expect_content(path, "old");
+    expect_int(tmp_files(path), 0);
+
+    /* only the directory's sync failing: the target is in place already and
+       the close still reports the failure, as documented */
+    write_content(path, "old");
+    fsync_calls = 0;
+    fsync_fail_at = 2;
+    st = n_stream_open(path, "w", TN_STREAM_ATOMIC | TN_STREAM_SYNC);
+    fail_if(st == NULL, "cannot open %s atomically and synchronously", path);
+    expect_int(n_stream_write(st, "new", 3), 3);
+    errno = 0;
+    expect_int(n_stream_close(st), -1);
+    expect_int(errno, EIO);
+    fsync_fail_at = 0;
+    expect_content(path, "new");
+    expect_int(tmp_files(path), 0);
 }
 END_TEST
 
@@ -670,6 +809,20 @@ START_TEST(test_atomic_errors)
     expect_int(errno, EINVAL);
     expect_int(tmp_files(plain), 0);
 
+    /* there is no rename for a sync to make durable */
+    errno = 0;
+    st = n_stream_open(plain, "w", TN_STREAM_SYNC);
+    fail_if(st != NULL, "TN_STREAM_SYNC was accepted without TN_STREAM_ATOMIC");
+    expect_int(errno, EINVAL);
+    expect_int(tmp_files(plain), 0);
+
+    /* a flag that does not exist yet is not silently ignored */
+    errno = 0;
+    st = n_stream_open(plain, "w", TN_STREAM_STDIO | (1 << 10));
+    fail_if(st != NULL, "an unknown flag was accepted");
+    expect_int(errno, EINVAL);
+    expect_int(tmp_files(plain), 0);
+
     /* a descriptor has no name to be renamed to */
     fd = open(plain, O_WRONLY | O_CREAT, 0600);
     fail_if(fd < 0, "cannot create %s", plain);
@@ -690,31 +843,37 @@ START_TEST(test_atomic_errors)
        running, and then there is no stream to give back */
     old_hook = n_die_set_hook(test_die_hook);
 
+    errno = 0;
     die_calls = 0;
     st = n_stream_open(plain, "w", 7);
     n_die_set_hook(old_hook);
     fail_if(st != NULL, "n_stream_open() accepted an unknown type");
     expect_int(die_calls, 1);
     expect_str(die_msg, "7: unknown stream type\n");
+    expect_int(errno, EINVAL);
 
     old_hook = n_die_set_hook(test_die_hook);
 
+    errno = 0;
     die_calls = 0;
     st = n_stream_open(plain, "w", 7 | TN_STREAM_ATOMIC);
     n_die_set_hook(old_hook);
     fail_if(st != NULL, "an unknown type was opened atomically");
     expect_int(die_calls, 1);
     expect_str(die_msg, "7: unknown stream type\n");
+    expect_int(errno, EINVAL);
     expect_int(tmp_files(plain), 0);   /* and no temporary file is left */
 
     old_hook = n_die_set_hook(test_die_hook);
 
+    errno = 0;
     die_calls = 0;
     st = n_stream_dopen(-1, "w", TN_STREAM_UNKNOWN);
     n_die_set_hook(old_hook);
     fail_if(st != NULL, "n_stream_dopen() accepted an unknown type");
     expect_int(die_calls, 1);
     expect_str(die_msg, "0: unknown stream type\n");
+    expect_int(errno, EINVAL);
 
     /* the old spelling of TN_STREAM_UNKNOWN reaches the same place */
     old_hook = n_die_set_hook(test_die_hook);
@@ -1016,7 +1175,9 @@ NTEST_RUNNER("nstream",
             test_close_error,
             test_printf_write_error,
             test_write_error_sets_errno,
+            test_flush_error_sets_errno,
             test_atomic,
+            test_atomic_sync,
             test_atomic_abort,
             test_atomic_mode_and_type,
             test_atomic_errors,
