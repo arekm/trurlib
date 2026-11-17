@@ -131,7 +131,7 @@ fi
 
 AC_CHECK_LIB(zstd, ZSTD_compressStream,,[AC_MSG_ERROR(["missing zstd"])])
 
-PKG_CHECK_MODULES(CHECK, check >= 0.9.4, have_check=yes, have_check=no)
+PKG_CHECK_MODULES(CHECK, check >= 0.13.0, have_check=yes, have_check=no)
 
 AC_CONFIG_FILES([
 Makefile
