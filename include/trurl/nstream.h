@@ -207,8 +207,9 @@ int n_stream_flush(tn_stream *st) {
     return rc;
 }
 
-/* 0, or -1 when closing failed: what was written may not be in the file;
-   an atomic stream is renamed into place only when its close succeeded */
+/* 0, or -1 when closing or a read before it failed: what was written may
+   not be in the file, what was read may not be all of it; an atomic stream
+   is renamed into place only when its close succeeded */
 int n_stream_close(tn_stream *st);
 
 int n_stream_guess_type(const char *path);

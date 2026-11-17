@@ -504,7 +504,8 @@ START_TEST (test_dopen_without_zstd_stream)
 }
 END_TEST
 
-/* a backward seek that cannot get a new zstd stream fails the read */
+/* a backward seek that cannot get a new zstd stream fails the read, and
+   the close reports it */
 START_TEST (test_seek_back_without_zstd_stream)
 {
     const char *path = NTEST_TMPPATH("niobuf-no-stream-seek.zst");
@@ -523,7 +524,7 @@ START_TEST (test_seek_back_without_zstd_stream)
     zstd_create_fails = 1;
     expect_int(n_iobuf_read(io, buf, 4), -1);
     zstd_create_fails = 0;
-    expect_int(n_iobuf_close(io), 0);
+    expect_int(n_iobuf_close(io), -1);
 }
 END_TEST
 

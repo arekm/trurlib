@@ -888,7 +888,7 @@ START_TEST(test_atomic_errors)
 END_TEST
 
 /* a read that fails returns -1, not the 0 of the end of the file; a read
-   of 0 bytes returns 0 */
+   of 0 bytes returns 0; the close reports it */
 static void do_test_read_error(int type)
 {
     const char *dir = NTEST_TMPPATH("nstream-read-error.d");
@@ -903,7 +903,7 @@ static void do_test_read_error(int type)
     fail_if(st == NULL, "cannot open %s as stream type %d", dir, type);
     expect_int(n_stream_read(st, buf, sizeof(buf)), -1);
     expect_int(n_stream_read(st, buf, 0), 0);
-    n_stream_close(st);
+    expect_int(n_stream_close(st), -1);
 }
 
 START_TEST(test_read_error)
@@ -1077,6 +1077,76 @@ static void do_test_cut_not(const char *path)
     expect_int(n_stream_close(st), 0);
 }
 
+/* a whole stream damaged where its decoder notices: zeros after a zstd
+   stream, which its decoder takes for a frame it does not know, or a gzip
+   trailer that does not match the data */
+static void write_damaged_stream(const char *path)
+{
+    tn_stream *st;
+    struct stat sb;
+    int fd;
+
+    fill_cut_data(1);
+    st = n_stream_open(path, "w", TN_STREAM_UNKNOWN);
+    fail_if(st == NULL, "cannot create %s", path);
+    expect_int(n_stream_write(st, cut_data, CUT_SIZE), CUT_SIZE);
+    expect_int(n_stream_close(st), 0);
+
+    fd = open(path, O_RDWR);
+    fail_if(fd == -1 || fstat(fd, &sb) != 0, "cannot open %s", path);
+    if (n_stream_guess_type(path) == TN_STREAM_ZSTDIO) {
+        static const char zeros[16];
+
+        fail_if(pwrite(fd, zeros, sizeof(zeros), sb.st_size) != sizeof(zeros),
+                "cannot damage %s", path);
+    } else {
+        unsigned char c;        /* the first byte of the CRC-32 of the data */
+
+        fail_if(pread(fd, &c, 1, sb.st_size - 8) != 1, "cannot read %s", path);
+        c ^= 0xff;
+        fail_if(pwrite(fd, &c, 1, sb.st_size - 8) != 1, "cannot damage %s", path);
+    }
+    fail_if(close(fd) != 0, "cannot close %s", path);
+}
+
+/* it reads as far as the damage, like a cut, and the close reports it */
+static void do_test_damaged_read(const char *path)
+{
+    tn_stream *st;
+
+    write_damaged_stream(path);
+    st = n_stream_open(path, "r", TN_STREAM_UNKNOWN);
+    fail_if(st == NULL, "cannot open %s", path);
+    read_to_cut(st, path, 0);
+    expect_int(n_stream_close(st), -1);
+}
+
+/* a seek back to data that reads well does not hide it from the close;
+   zstd only, as zlib refuses to seek after a damaged member */
+static void do_test_damaged_seek(const char *path)
+{
+    tn_stream *st;
+    char buf[100];
+
+    write_damaged_stream(path);
+    st = n_stream_open(path, "r", TN_STREAM_UNKNOWN);
+    fail_if(st == NULL, "cannot open %s", path);
+    read_to_cut(st, path, 0);
+    fail_if(n_stream_seek(st, 0, SEEK_SET) == -1, "%s: seek back failed", path);
+    expect_int(n_stream_read(st, buf, sizeof(buf)), sizeof(buf));
+    expect_int(memcmp(buf, cut_data, sizeof(buf)), 0);
+    expect_int(n_stream_close(st), -1);
+}
+
+START_TEST(test_damaged_read)
+{
+    do_test_damaged_read(NTEST_TMPPATH("nstream-damaged.gz"));
+    do_test_damaged_read(NTEST_TMPPATH("nstream-damaged.ngz"));
+    do_test_damaged_read(NTEST_TMPPATH("nstream-damaged.zst"));
+    do_test_damaged_seek(NTEST_TMPPATH("nstream-damaged-seek.zst"));
+}
+END_TEST
+
 START_TEST(test_cut_read)
 {
     /* gzip only at CUT_HALF: zlib and zlib-ng miss a cut at CUT_SIZE / 2 */
@@ -1186,4 +1256,5 @@ NTEST_RUNNER("nstream",
             test_cut_getline,
             test_cut_seek,
             test_cut_not,
+            test_damaged_read,
             test_printf_write_hook);
