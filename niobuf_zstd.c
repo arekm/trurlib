@@ -35,7 +35,7 @@ struct zstd_state {
 
     int            failed;      /* zstd.h: no use after an error until reset */
     size_t         hint;        /* of ZSTD_decompressStream(), 0: no frame open */
-    int            cut;         /* the file ended inside a frame; kept for the close */
+    int            read_failed; /* a read failed, a cut too; a reset keeps it */
 };
 
 static ZSTD_CStream *zstd_new_c_stream(size_t *size) {
@@ -153,7 +153,7 @@ int zstd_read(struct zstd_state *st, FILE *file, void *dest, size_t dsize)
         if (st->inbuf.pos == st->inbuf.size) { /* empty or consumed */
             if (fill_inbuf(st, file) == 0) {
                 if (ferror(file)) {
-                    st->failed = 1;
+                    st->failed = st->read_failed = 1;
                     return output.pos > 0 ? (int) output.pos : -1;
                 }
                 if (st->hint == 0)             /* EOF between frames */
@@ -166,14 +166,14 @@ int zstd_read(struct zstd_state *st, FILE *file, void *dest, size_t dsize)
 	size_t n = ZSTD_decompressStream(st->stream, &output, &st->inbuf);
 	if (ZSTD_isError(n)) {
             fprintf(stderr, "ZSTD_decompressStream: %s\n", ZSTD_getErrorName(n));
-            st->failed = 1;
+            st->failed = st->read_failed = 1;
 	    return -1;
 	}
         st->hint = n;
 
         if (eof && output.pos == pos && n > 0) { /* holds nothing, needs more */
             fprintf(stderr, "ZSTD_decompressStream: unexpected end of file\n");
-            st->failed = st->cut = 1;
+            st->failed = st->read_failed = 1;
             return output.pos > 0 ? (int) output.pos : -1;
         }
     }
@@ -269,7 +269,9 @@ static void zstd_free(struct zstd_state *st)
 static int zstd_destroy(struct zstd_state *st, FILE *file)
 {
     if (st->mode == TRURL_IO_MODE_READ) {
-        int rc = st->cut ? -1 : 0;      /* what was read is not the whole stream */
+        /* what was read is not the whole stream: a read failed, or a reset
+           left no stream to read with */
+        int rc = st->read_failed || st->failed ? -1 : 0;
 
         zstd_free(st);
         return rc;

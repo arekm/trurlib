@@ -497,7 +497,7 @@ void *n_oash_it_get(tn_oash_it *hi, const char **key) {
     struct tentry *table = hi->ht->table;
     size_t i = hi->pos;
 
-    while (table[i].hash == 0 && i < hi->ht->cap)
+    while (i < hi->ht->cap && table[i].hash == 0)
         i++;
 
     if (i >= hi->ht->cap)

@@ -35,7 +35,7 @@
 /* what st->stream of a gzip stream points to */
 struct gz_stream {
     gzFile gz;
-    int    cut;                 /* the file ended inside a gzip member */
+    int    err;                 /* the first error of a read, Z_OK if none */
 };
 
 static inline gzFile gz_of(void *stream)
@@ -43,28 +43,29 @@ static inline gzFile gz_of(void *stream)
     return ((struct gz_stream *) stream)->gz;
 }
 
-/* Z_BUF_ERROR: the file ended inside a gzip member; zlib clears it at
-   the next call and zlib-ng at a seek back, so it is kept here */
-static int note_cut(void *stream)
+/* gzclose() reports neither a damaged member (Z_DATA_ERROR) nor a read
+   that failed (Z_ERRNO), and a cut (Z_BUF_ERROR) only until zlib clears it
+   at the next call or zlib-ng at a seek back, so the first error is kept */
+static int note_error(void *stream)
 {
     struct gz_stream *gs = stream;
     int err;
 
     zng_gzerror(gs->gz, &err);
-    if (err == Z_BUF_ERROR)
-        gs->cut = 1;
-    return gs->cut;
+    if (gs->err == Z_OK)
+        gs->err = err;
+    return gs->err != Z_OK;
 }
 
 static int do_ngz_read(void *stream, void *buf, size_t size)
 {
-    int n, cut;
+    int n, failed;
 
     if (size == 0)              /* gzread() would return an earlier error */
         return 0;
     n = zng_gzread(gz_of(stream), buf, size);
-    cut = note_cut(stream);
-    return n == 0 && cut ? -1 : n;
+    failed = note_error(stream);
+    return n == 0 && failed ? -1 : n;
 }
 
 static int do_ngz_write(void *stream, const void *buf, size_t size)
@@ -76,7 +77,7 @@ static char *do_ngz_gets(void *stream, char *buf, size_t size)
 {
     char *s = zng_gzgets(gz_of(stream), buf, size);
 
-    note_cut(stream);
+    note_error(stream);
     return s;
 }
 
@@ -94,7 +95,7 @@ static int do_ngz_getc(void *stream)
 {
     register int c = zng_gzgetc(gz_of(stream));
 
-    note_cut(stream);
+    note_error(stream);
     if (c == -1)
         return EOF;
 
@@ -189,8 +190,8 @@ static int do_ngz_close(void *stream)
 {
     int rc = zng_gzclose(gz_of(stream));
 
-    if (rc == Z_OK && ((struct gz_stream *) stream)->cut)
-        rc = Z_BUF_ERROR;       /* zlib has forgotten it by now */
+    if (rc == Z_OK)
+        rc = ((struct gz_stream *) stream)->err;
     free(stream);
     return rc;
 }
