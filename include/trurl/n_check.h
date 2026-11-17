@@ -18,6 +18,9 @@
 #include <unistd.h>
 
 #include <check.h>
+#if CHECK_MAJOR_VERSION == 0 && CHECK_MINOR_VERSION < 13
+# error "n_check.h needs check 0.13.0 or later, for TTest"
+#endif
 #include "nassert.h"
 #include "n_snprintf.h"
 
@@ -49,33 +52,7 @@ static inline char *__ncheck_make_test_tmp_path(char *path, size_t size,
 
 // Overloading Macro on Number of Arguments
 // taken from https://stackoverflow.com/a/11994395
-#define FE_0(WHAT)
-#define FE_1(WHAT, X) WHAT(X)
-#define FE_2(WHAT, X, ...) WHAT(X)FE_1(WHAT, __VA_ARGS__)
-#define FE_3(WHAT, X, ...) WHAT(X)FE_2(WHAT, __VA_ARGS__)
-#define FE_4(WHAT, X, ...) WHAT(X)FE_3(WHAT, __VA_ARGS__)
-#define FE_5(WHAT, X, ...) WHAT(X)FE_4(WHAT, __VA_ARGS__)
-#define FE_6(WHAT, X, ...) WHAT(X)FE_5(WHAT, __VA_ARGS__)
-#define FE_7(WHAT, X, ...) WHAT(X)FE_6(WHAT, __VA_ARGS__)
-#define FE_8(WHAT, X, ...) WHAT(X)FE_7(WHAT, __VA_ARGS__)
-#define FE_9(WHAT, X, ...) WHAT(X)FE_8(WHAT, __VA_ARGS__)
-#define FE_10(WHAT, X, ...) WHAT(X)FE_9(WHAT, __VA_ARGS__)
-#define FE_11(WHAT, X, ...) WHAT(X)FE_10(WHAT, __VA_ARGS__)
-#define FE_12(WHAT, X, ...) WHAT(X)FE_11(WHAT, __VA_ARGS__)
-#define FE_13(WHAT, X, ...) WHAT(X)FE_12(WHAT, __VA_ARGS__)
-#define FE_14(WHAT, X, ...) WHAT(X)FE_13(WHAT, __VA_ARGS__)
-#define FE_15(WHAT, X, ...) WHAT(X)FE_14(WHAT, __VA_ARGS__)
-#define FE_16(WHAT, X, ...) WHAT(X)FE_15(WHAT, __VA_ARGS__)
-#define FE_17(WHAT, X, ...) WHAT(X)FE_16(WHAT, __VA_ARGS__)
-#define FE_18(WHAT, X, ...) WHAT(X)FE_17(WHAT, __VA_ARGS__)
-#define FE_19(WHAT, X, ...) WHAT(X)FE_18(WHAT, __VA_ARGS__)
-#define FE_20(WHAT, X, ...) WHAT(X)FE_19(WHAT, __VA_ARGS__)
-#define FE_21(WHAT, X, ...) WHAT(X)FE_20(WHAT, __VA_ARGS__)
-#define FE_22(WHAT, X, ...) WHAT(X)FE_21(WHAT, __VA_ARGS__)
-#define FE_23(WHAT, X, ...) WHAT(X)FE_22(WHAT, __VA_ARGS__)
-#define FE_24(WHAT, X, ...) WHAT(X)FE_23(WHAT, __VA_ARGS__)
 #define GET_MACRO(_0, _1, _2, _3, _4, _5, _6, _7, _8, _9, NAME, ...) NAME
-#define GET_FE_MACRO(_0, _1, _2, _3, _4, _5, _6, _7, _8, _9, _10, _11, _12, _13, _14, _15, _16, _17, _18, _19, _20, _21, _22, _23, _24, NAME, ...) NAME
 
 static int __ncheck_verbosity = CK_ENV;
 static int __ncheck_log_verbose = 0;
@@ -102,7 +79,8 @@ static inline int __ncheck_runner(Suite *suite) {
     return (nerr == 0) ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
-static inline void __ncheck_process_args(int argc, char *argv[], char *tests[]) {
+static inline void __ncheck_process_args(int argc, char *argv[],
+                                         const TTest *const tests[]) {
 
     if (argc < 2)
         return;
@@ -111,9 +89,8 @@ static inline void __ncheck_process_args(int argc, char *argv[], char *tests[]) 
         const char *arg = argv[i];
 
         if (strcmp(arg, "-l") == 0) {
-            int n = 0;
-            while (tests[n])
-                printf("%s\n", tests[n++]);
+            for (int n = 0; tests[n] != NULL; n++)
+                printf("%s\n", tests[n]->name);
 
             exit(EXIT_SUCCESS);
         }
@@ -136,25 +113,21 @@ static inline const char *__ncheck_test_name(const char *name) {
 }
 
 
-/* internal macro */
-#define __REGISTER_TEST(function)             \
-    do {                                      \
-        n_assert(__suite != NULL);            \
-        TCase *tc = tcase_create(__ncheck_test_name(#function)); \
-        tcase_add_test(tc, function);         \
-        suite_add_tcase(__suite, tc);         \
-        int i = 0;                            \
-        while (__tests[i] != NULL) i++;       \
-        __tests[i] = #function;               \
-    } while (0);
+static inline void __ncheck_add_tests(Suite *suite, const TTest *const tests[]) {
+    for (int i = 0; tests[i] != NULL; i++) {
+        TCase *tc = tcase_create(__ncheck_test_name(tests[i]->name));
+        tcase_add_test(tc, tests[i]);
+        suite_add_tcase(suite, tc);
+    }
+}
 
-
-
+/* the tests are the names given to START_TEST(), which check makes
+   pointers to the test and its name, so any number goes */
 #define NTEST_RUNNER(name, ...)                               \
     int main(int argc, char *argv[]) {                        \
+        const TTest *__tests[] = { __VA_ARGS__, NULL };       \
         Suite *__suite = suite_create(name);                  \
-        char  **__tests = calloc(1024, sizeof(*__tests));     \
-        GET_FE_MACRO(_0, __VA_ARGS__, FE_24, FE_23, FE_22, FE_21, FE_20, FE_19, FE_18, FE_17, FE_16, FE_15, FE_14, FE_13, FE_12, FE_11, FE_10, FE_9, FE_8, FE_7, FE_6, FE_5, FE_4, FE_3, FE_2, FE_1, FE_0)(__REGISTER_TEST, __VA_ARGS__); \
+        __ncheck_add_tests(__suite, __tests);                 \
         __ncheck_process_args(argc, argv, __tests);           \
         return __ncheck_runner(__suite);                      \
     }
