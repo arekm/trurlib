@@ -11,6 +11,12 @@ AC_INIT([trurlib], [trurlib_version], [http://bugs.launchpad.net/poldek])
 AC_CONFIG_SRCDIR([n_hash_keys.c])
 AC_CONFIG_HEADERS([config.h])
 
+# O_DIRECTORY is POSIX.1-2008, but a strict -std=cNN hides it; ask for the
+# default set of interfaces so that the sources do not depend on the mode.
+# (_GNU_SOURCE would also turn on glibc's C23 string declarations.)
+AC_DEFINE([_DEFAULT_SOURCE], [1],
+          [Define to 1 to get the default set of libc interfaces.])
+
 AM_INIT_AUTOMAKE([1.11 foreign no-dist-gzip dist-xz])
 AM_MAINTAINER_MODE([enable])
 AM_SILENT_RULES([no])

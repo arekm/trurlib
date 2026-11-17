@@ -1,12 +1,38 @@
+#ifdef HAVE_CONFIG_H
+# include "config.h"           /* _DEFAULT_SOURCE, for glob() and friends */
+#endif
+
 #include <errno.h>
 #include <fcntl.h>
+#include <glob.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 #include "n_check.h"
+#include "ndie.h"
 #include "nmalloc.h"
 #include "nstream.h"
 #include "nstore.h"
+
+/* TN_STREAM_SYNC fsyncs the new file and then its directory; libtrurl
+   resolves fsync() through the executable's definition, so the test can
+   count the calls and fail one of them.  The real one is reached through
+   syscall(), as calling fsync() here would recurse. */
+static int fsync_calls;
+static int fsync_fail_at;       /* 1-based number of the call to fail */
+
+int fsync(int fd)
+{
+    fsync_calls++;
+
+    if (fsync_calls == fsync_fail_at) {
+        errno = EIO;
+        return -1;
+    }
+
+    return (int)syscall(SYS_fsync, fd);
+}
 
 void do_test_read_write(const char *tmppath)
 {
@@ -314,6 +340,19 @@ static int write_nothing(void *stream, const void *buf, size_t size)
     return 0;
 }
 
+static int flush_nothing(void *stream)
+{
+    (void) stream;
+    return EOF;
+}
+
+static int flush_fails(void *stream)
+{
+    (void) stream;
+    errno = ENOSPC;
+    return EOF;
+}
+
 START_TEST(test_write_error_sets_errno)
 {
     tn_stream st;
@@ -324,10 +363,527 @@ START_TEST(test_write_error_sets_errno)
     errno = 0;
     expect_int(n_stream_write(&st, "abc", 3), 0);
     expect_int(errno, EIO);
+    expect_int(st.werr, EIO);
 
     errno = 0;
     expect_int(n_stream_printf(&st, "%s", "abc"), -1);
     expect_int(errno, EIO);
+    expect_int(st.werr, EIO);
+}
+END_TEST
+
+/* an explicitly flushed failure is a failed write too: a later atomic
+   close must not publish what was not written */
+START_TEST(test_flush_error_sets_errno)
+{
+    tn_stream st;
+
+    memset(&st, 0, sizeof(st));
+    st.st_flush = flush_fails;
+
+    errno = 0;
+    expect_int(n_stream_flush(&st), EOF);
+    expect_int(errno, ENOSPC);
+    expect_int(st.werr, ENOSPC);
+
+    /* the first error is the one the close reports */
+    st.st_write = write_nothing;
+    errno = 0;
+    expect_int(n_stream_write(&st, "abc", 3), 0);
+    expect_int(errno, EIO);
+    expect_int(st.werr, ENOSPC);
+
+    /* no errno from the backend, as gzflush() may do */
+    memset(&st, 0, sizeof(st));
+    st.st_flush = flush_nothing;
+
+    errno = 0;
+    expect_int(n_stream_flush(&st), EOF);
+    expect_int(errno, EIO);
+    expect_int(st.werr, EIO);
+}
+END_TEST
+
+/* reads the whole file back */
+static void expect_content_type(const char *path, const char *content, int type)
+{
+    char buf[256];
+    tn_stream *st;
+    int n;
+
+    st = n_stream_open(path, "r", type);
+    fail_if(st == NULL, "cannot open %s", path);
+    n = n_stream_read(st, buf, sizeof(buf) - 1);
+    fail_if(n < 0, "%s: read failed", path);
+    buf[n] = '\0';
+    expect_str(buf, content);
+    n_stream_close(st);
+}
+
+static void expect_content(const char *path, const char *content)
+{
+    expect_content_type(path, content, TN_STREAM_UNKNOWN);
+}
+
+static void write_content(const char *path, const char *content)
+{
+    tn_stream *st = n_stream_open(path, "w", TN_STREAM_UNKNOWN);
+    int len = strlen(content);
+
+    fail_if(st == NULL, "cannot create %s", path);
+    expect_int(n_stream_write(st, content, len), len);
+    expect_int(n_stream_close(st), 0);
+}
+
+static int die_calls;
+static char die_msg[256];
+
+static void test_die_hook(const char *errmsg)
+{
+    die_calls++;
+    snprintf(die_msg, sizeof(die_msg), "%s", errmsg);
+}
+
+/* the path.tmpXXXXXX files a close or an abort must not leave behind */
+static int tmp_files(const char *path)
+{
+    char pattern[4096];
+    glob_t g;
+    int n;
+
+    snprintf(pattern, sizeof(pattern), "%s.tmp??????", path);
+    memset(&g, 0, sizeof(g));
+    n = glob(pattern, 0, NULL, &g) == 0 ? (int)g.gl_pathc : 0;
+    globfree(&g);
+    return n;
+}
+
+START_TEST(test_atomic)
+{
+    const char *path = NTEST_TMPPATH("nstream-atomic.txt");
+    const char *rep = NTEST_TMPPATH("nstream-atomic-replace.txt");
+    const char *tmpp = NTEST_TMPPATH("nstream-atomic.tmp.txt");
+    struct stat sb;
+    tn_stream *st;
+
+    unlink(path);
+    st = n_stream_open(path, "w", TN_STREAM_UNKNOWN | TN_STREAM_ATOMIC);
+    fail_if(st == NULL, "cannot open %s atomically", path);
+    expect_int(n_stream_write(st, "hello", 5), 5);
+    expect_int(n_stream_close(st), 0);
+    expect_content(path, "hello");
+    expect_int(tmp_files(path), 0);
+
+    /* TN_STREAM_UNKNOWN was -1: a binary built against the old header
+       still passes it */
+    unlink(path);
+    st = n_stream_open(path, "w", -1);
+    fail_if(st == NULL, "cannot open %s with the old TN_STREAM_UNKNOWN", path);
+    expect_int(n_stream_write(st, "old", 3), 3);
+    expect_int(n_stream_close(st), 0);
+    expect_content(path, "old");
+
+    write_content(rep, "old");
+    st = n_stream_open(rep, "w", TN_STREAM_ATOMIC);
+    fail_if(st == NULL, "cannot open %s atomically", rep);
+    expect_int(n_stream_write(st, "new", 3), 3);
+    expect_content(rep, "old");         /* renamed only by the close */
+    expect_int(n_stream_close(st), 0);
+    expect_content(rep, "new");
+    expect_int(tmp_files(rep), 0);
+
+    /* nothing written is still a file to publish: an empty stub index */
+    unlink(path);
+    st = n_stream_open(path, "w", TN_STREAM_ATOMIC);
+    fail_if(st == NULL, "cannot open %s atomically", path);
+    expect_int(n_stream_close(st), 0);
+    fail_if(stat(path, &sb) != 0, "cannot stat %s", path);
+    expect_int((int)sb.st_size, 0);
+
+    /* the consumers write through n_stream_printf() */
+    unlink(path);
+    st = n_stream_open(path, "w", TN_STREAM_ATOMIC);
+    fail_if(st == NULL, "cannot open %s atomically", path);
+    expect_int(n_stream_printf(st, "line %d\n", 1), 7);
+    expect_int(n_stream_printf(st, "line %d\n", 2), 7);
+    expect_int(n_stream_close(st), 0);
+    expect_content(path, "line 1\nline 2\n");
+
+    /* only the fixed suffix is cut: a ".tmp" in the target name stays */
+    unlink(tmpp);
+    st = n_stream_open(tmpp, "w", TN_STREAM_ATOMIC);
+    fail_if(st == NULL, "cannot open %s atomically", tmpp);
+    expect_int(n_stream_write(st, "kept", 4), 4);
+    expect_int(n_stream_close(st), 0);
+    expect_content(tmpp, "kept");
+    expect_int(tmp_files(tmpp), 0);
+}
+END_TEST
+
+START_TEST(test_atomic_sync)
+{
+    const char *plain = NTEST_TMPPATH("nstream-atomic-sync-plain.txt");
+    const char *gz = NTEST_TMPPATH("nstream-atomic-sync.gz");
+    const char *path = NTEST_TMPPATH("nstream-atomic-sync.txt");
+    tn_stream *st;
+
+    /* the flag is what makes the syncs: without it there are none */
+    unlink(plain);
+    fsync_calls = 0;
+    st = n_stream_open(plain, "w", TN_STREAM_ATOMIC);
+    fail_if(st == NULL, "cannot open %s atomically", plain);
+    expect_int(n_stream_write(st, "new", 3), 3);
+    expect_int(n_stream_close(st), 0);
+    expect_int(fsync_calls, 0);
+
+    unlink(plain);
+    fsync_calls = 0;
+    st = n_stream_open(plain, "w", TN_STREAM_ATOMIC | TN_STREAM_SYNC);
+    fail_if(st == NULL, "cannot open %s atomically and synchronously", plain);
+    expect_int(n_stream_write(st, "new", 3), 3);
+    expect_int(n_stream_close(st), 0);
+    expect_int(fsync_calls, 2); /* the file, then its directory */
+    expect_content(plain, "new");
+    expect_int(tmp_files(plain), 0);
+
+    /* a compressed stream writes its trailer in the close, so the fsync
+       must be done on a descriptor that outlives it */
+    unlink(gz);
+    fsync_calls = 0;
+    st = n_stream_open(gz, "w", TN_STREAM_ATOMIC | TN_STREAM_SYNC);
+    fail_if(st == NULL, "cannot open %s atomically and synchronously", gz);
+    expect_int(n_stream_write(st, "0123456789", 10), 10);
+    expect_int(n_stream_close(st), 0);
+    expect_int(fsync_calls, 2);
+    expect_content_type(gz, "0123456789", TN_STREAM_UNKNOWN);
+    expect_int(tmp_files(gz), 0);
+
+    /* the rename comes after the file's sync: when that sync fails the
+       target keeps its old contents */
+    write_content(path, "old");
+    fsync_calls = 0;
+    fsync_fail_at = 1;
+    st = n_stream_open(path, "w", TN_STREAM_ATOMIC | TN_STREAM_SYNC);
+    fail_if(st == NULL, "cannot open %s atomically and synchronously", path);
+    expect_int(n_stream_write(st, "new", 3), 3);
+    errno = 0;
+    expect_int(n_stream_close(st), -1);
+    expect_int(errno, EIO);
+    fsync_fail_at = 0;
+    expect_content(path, "old");
+    expect_int(tmp_files(path), 0);
+
+    /* only the directory's sync failing: the target is in place already and
+       the close still reports the failure, as documented */
+    write_content(path, "old");
+    fsync_calls = 0;
+    fsync_fail_at = 2;
+    st = n_stream_open(path, "w", TN_STREAM_ATOMIC | TN_STREAM_SYNC);
+    fail_if(st == NULL, "cannot open %s atomically and synchronously", path);
+    expect_int(n_stream_write(st, "new", 3), 3);
+    errno = 0;
+    expect_int(n_stream_close(st), -1);
+    expect_int(errno, EIO);
+    fsync_fail_at = 0;
+    expect_content(path, "new");
+    expect_int(tmp_files(path), 0);
+}
+END_TEST
+
+START_TEST(test_atomic_abort)
+{
+    const char *path = NTEST_TMPPATH("nstream-atomic-abort.txt");
+    const char *errpath = NTEST_TMPPATH("nstream-atomic-werr.txt");
+    const char *bad = NTEST_TMPPATH("nstream-atomic-abort-bad.txt");
+    char bad_tmp[PATH_MAX];
+    t_fn_die_hook old_hook;
+    tn_stream *st;
+    int rc;
+
+    write_content(path, "old");
+    st = n_stream_open(path, "w", TN_STREAM_ATOMIC);
+    fail_if(st == NULL, "cannot open %s atomically", path);
+    expect_int(n_stream_write(st, "new", 3), 3);
+    expect_int(n_stream_abort(st), 0);
+    expect_content(path, "old");
+    expect_int(tmp_files(path), 0);
+
+    /* as if the write had failed after the bytes were taken: the close must
+       drop the temporary file, not rename a file known to be cut */
+    unlink(errpath);
+    st = n_stream_open(errpath, "w", TN_STREAM_ATOMIC);
+    fail_if(st == NULL, "cannot open %s atomically", errpath);
+    expect_int(n_stream_write(st, "x", 1), 1);
+    st->werr = ENOSPC;
+    errno = 0;
+    expect_int(n_stream_close(st), -1);
+    expect_int(errno, ENOSPC);
+    fail_if(access(errpath, F_OK) == 0, "%s: a failed write was renamed",
+            errpath);
+    expect_int(tmp_files(errpath), 0);
+
+    /* a temporary file that cannot be unlinked is an error of its own */
+    unlink(bad);
+    st = n_stream_open(bad, "w", TN_STREAM_ATOMIC);
+    fail_if(st == NULL, "cannot open %s atomically", bad);
+    snprintf(bad_tmp, sizeof(bad_tmp), "%s", st->path);
+    expect_int(n_stream_write(st, "x", 1), 1);
+    unlink(bad_tmp);                /* the open descriptor is unaffected */
+    fail_if(mkdir(bad_tmp, 0700) != 0, "cannot mkdir %s", bad_tmp);
+
+    errno = 0;
+    expect_int(n_stream_abort(st), -1);
+    fail_if(errno != EISDIR && errno != EPERM,
+            "unexpected errno %d of a failed unlink", errno);
+    rmdir(bad_tmp);
+
+    fail_if(access(bad, F_OK) == 0, "%s: abort published the target", bad);
+
+    /* a stream that is not atomic has nothing to abort: n_die() reports the
+       misuse, and the stream is still closed, so what was written is there */
+    unlink(path);
+    st = n_stream_open(path, "w", TN_STREAM_UNKNOWN);
+    fail_if(st == NULL, "cannot open %s", path);
+    expect_int(n_stream_write(st, "abc", 3), 3);
+
+    old_hook = n_die_set_hook(test_die_hook);
+    die_calls = 0;
+    rc = n_stream_abort(st);
+    n_die_set_hook(old_hook);
+
+    expect_int(die_calls, 1);
+    expect_str(die_msg, "non-atomic stream cannot be aborted\n");
+    expect_int(rc, 0);
+    expect_content(path, "abc");
+}
+END_TEST
+
+static void do_test_atomic_type(const char *path, int type, const char *mode,
+                                int read_type)
+{
+    tn_stream *st;
+    size_t len = strlen("0123456789");
+
+    unlink(path);
+    st = n_stream_open(path, mode, type);
+    fail_if(st == NULL, "cannot open %s atomically", path);
+    expect_int(n_stream_write(st, "0123456789", len), len);
+    expect_int(n_stream_close(st), 0);
+    expect_content_type(path, "0123456789", read_type);
+    expect_int(tmp_files(path), 0);
+}
+
+START_TEST(test_atomic_mode_and_type)
+{
+    const char *path = NTEST_TMPPATH("nstream-atomic-mode.txt");
+    const char *suid = NTEST_TMPPATH("nstream-atomic-mode-suid.txt");
+    const char *newp = NTEST_TMPPATH("nstream-atomic-mode-new.txt");
+    const char *sec = NTEST_TMPPATH("nstream-atomic-mode-umask077.txt");
+    const char *real = NTEST_TMPPATH("nstream-atomic-symlink-real.txt");
+    const char *link = NTEST_TMPPATH("nstream-atomic-symlink.txt");
+    struct stat sb;
+    mode_t mask;
+    tn_stream *st;
+
+    /* an existing file keeps its mode, and the temporary file is 0600 until
+       the close, so a partial write is never readable by others */
+    write_content(path, "x");
+    fail_if(chmod(path, 0640) != 0, "cannot chmod %s", path);
+    st = n_stream_open(path, "w", TN_STREAM_ATOMIC);
+    fail_if(st == NULL, "cannot open %s atomically", path);
+    fail_if(stat(st->path, &sb) != 0, "cannot stat the temporary file");
+    expect_int((int)(sb.st_mode & 0777), 0600);
+    expect_int(n_stream_write(st, "y", 1), 1);
+    expect_int(n_stream_close(st), 0);
+    fail_if(stat(path, &sb) != 0, "cannot stat %s", path);
+    expect_int((int)(sb.st_mode & 0777), 0640);
+
+    /* setuid and setgid are not carried over to the new file */
+    write_content(suid, "x");
+    fail_if(chmod(suid, 04755) != 0, "cannot chmod %s", suid);
+    st = n_stream_open(suid, "w", TN_STREAM_ATOMIC);
+    fail_if(st == NULL, "cannot open %s atomically", suid);
+    expect_int(n_stream_write(st, "y", 1), 1);
+    expect_int(n_stream_close(st), 0);
+    fail_if(stat(suid, &sb) != 0, "cannot stat %s", suid);
+    expect_int((int)(sb.st_mode & 07777), 0755);
+
+    /* a new file gets 0666 & ~umask */
+    unlink(newp);
+    mask = umask(022);
+    st = n_stream_open(newp, "w", TN_STREAM_ATOMIC);
+    umask(mask);
+    fail_if(st == NULL, "cannot open %s atomically", newp);
+    expect_int(n_stream_write(st, "z", 1), 1);
+    expect_int(n_stream_close(st), 0);
+    fail_if(stat(newp, &sb) != 0, "cannot stat %s", newp);
+    expect_int((int)(sb.st_mode & 0777), 0644);
+
+    /* a tighter umask is honoured too */
+    unlink(sec);
+    mask = umask(077);
+    st = n_stream_open(sec, "w", TN_STREAM_ATOMIC);
+    umask(mask);
+    fail_if(st == NULL, "cannot open %s atomically", sec);
+    expect_int(n_stream_write(st, "z", 1), 1);
+    expect_int(n_stream_close(st), 0);
+    fail_if(stat(sec, &sb) != 0, "cannot stat %s", sec);
+    expect_int((int)(sb.st_mode & 0777), 0600);
+
+    /* a symlink is replaced by the file it pointed at, mode included; the
+       file itself it pointed at is left alone */
+    write_content(real, "old");
+    fail_if(chmod(real, 0640) != 0, "cannot chmod %s", real);
+    unlink(link);
+    fail_if(symlink(real, link) != 0, "cannot symlink %s", link);
+    st = n_stream_open(link, "w", TN_STREAM_ATOMIC);
+    fail_if(st == NULL, "cannot open %s atomically", link);
+    expect_int(n_stream_write(st, "new", 3), 3);
+    expect_int(n_stream_close(st), 0);
+    fail_if(lstat(link, &sb) != 0, "cannot lstat %s", link);
+    fail_if(S_ISLNK(sb.st_mode), "%s is still a symlink", link);
+    expect_int((int)(sb.st_mode & 0777), 0640);
+    expect_content(link, "new");
+    expect_content(real, "old");
+    unlink(link);
+
+    expect_int(tmp_files(path), 0);
+    expect_int(tmp_files(suid), 0);
+    expect_int(tmp_files(newp), 0);
+    expect_int(tmp_files(sec), 0);
+
+    /* the type is guessed from the target name, not from path.tmpXXXXXX */
+    do_test_atomic_type(NTEST_TMPPATH("nstream-atomic.gz"), TN_STREAM_ATOMIC,
+                        "w", TN_STREAM_UNKNOWN);
+    do_test_atomic_type(NTEST_TMPPATH("nstream-atomic.zst"), TN_STREAM_ATOMIC,
+                        "w", TN_STREAM_UNKNOWN);
+
+    /* the mode still carries the gz compression level into gzdopen() */
+    do_test_atomic_type(NTEST_TMPPATH("nstream-atomic-level.gz"),
+                        TN_STREAM_ATOMIC, "wb9", TN_STREAM_UNKNOWN);
+
+    /* an explicit type wins over a name without a compression suffix */
+    do_test_atomic_type(NTEST_TMPPATH("nstream-atomic-explicit"),
+                        TN_STREAM_GZIO | TN_STREAM_ATOMIC, "w",
+                        TN_STREAM_GZIO);
+}
+END_TEST
+
+START_TEST(test_atomic_errors)
+{
+    const char *dir = NTEST_TMPPATH("nstream-atomic-dir");
+    const char *missing = NTEST_TMPPATH("nstream-no-such-dir/atomic.txt");
+    const char *plain = NTEST_TMPPATH("nstream-atomic-errors.txt");
+    struct stat sb;
+    t_fn_die_hook old_hook;
+    tn_stream *st;
+    int fd;
+
+    rmdir(dir);
+    fail_if(mkdir(dir, 0700) != 0, "cannot mkdir %s", dir);
+    st = n_stream_open(dir, "w", TN_STREAM_ATOMIC);
+    fail_if(st == NULL, "cannot open %s atomically", dir);
+    expect_int(n_stream_write(st, "x", 1), 1);
+
+    expect_int(n_stream_close(st), -1);
+    fail_if(stat(dir, &sb) != 0 || !S_ISDIR(sb.st_mode),
+            "%s: the directory was replaced", dir);
+    expect_int(tmp_files(dir), 0);
+    rmdir(dir);
+
+    errno = 0;
+    st = n_stream_open(missing, "w", TN_STREAM_ATOMIC);
+    fail_if(st != NULL, "atomic open succeeded in a missing directory");
+    expect_int(errno, ENOENT);
+
+    /* a mode that would rename an empty file over the target */
+    errno = 0;
+    st = n_stream_open(plain, "r", TN_STREAM_ATOMIC);
+    fail_if(st != NULL, "a read stream was opened atomically");
+    expect_int(errno, EINVAL);
+    expect_int(tmp_files(plain), 0);
+
+    errno = 0;
+    st = n_stream_open(plain, "a", TN_STREAM_ATOMIC);
+    fail_if(st != NULL, "an append stream was opened atomically");
+    expect_int(errno, EINVAL);
+    expect_int(tmp_files(plain), 0);
+
+    /* there is no rename for a sync to make durable */
+    errno = 0;
+    st = n_stream_open(plain, "w", TN_STREAM_SYNC);
+    fail_if(st != NULL, "TN_STREAM_SYNC was accepted without TN_STREAM_ATOMIC");
+    expect_int(errno, EINVAL);
+    expect_int(tmp_files(plain), 0);
+
+    /* a flag that does not exist yet is not silently ignored */
+    errno = 0;
+    st = n_stream_open(plain, "w", TN_STREAM_STDIO | (1 << 10));
+    fail_if(st != NULL, "an unknown flag was accepted");
+    expect_int(errno, EINVAL);
+    expect_int(tmp_files(plain), 0);
+
+    /* a descriptor has no name to be renamed to */
+    fd = open(plain, O_WRONLY | O_CREAT, 0600);
+    fail_if(fd < 0, "cannot create %s", plain);
+    errno = 0;
+    st = n_stream_dopen(fd, "w", TN_STREAM_STDIO | TN_STREAM_ATOMIC);
+    fail_if(st != NULL, "a flag was accepted by n_stream_dopen()");
+    expect_int(errno, EINVAL);
+    close(fd);
+    unlink(plain);
+
+    /* a descriptor the backend cannot open: the stream is freed, not leaked */
+    errno = 0;
+    st = n_stream_dopen(-1, "w", TN_STREAM_STDIO);
+    fail_if(st != NULL, "n_stream_dopen() accepted a closed descriptor");
+    expect_int(errno, EBADF);
+
+    /* an unknown type is reported by n_die(); its hook lets the caller keep
+       running, and then there is no stream to give back */
+    old_hook = n_die_set_hook(test_die_hook);
+
+    errno = 0;
+    die_calls = 0;
+    st = n_stream_open(plain, "w", 7);
+    n_die_set_hook(old_hook);
+    fail_if(st != NULL, "n_stream_open() accepted an unknown type");
+    expect_int(die_calls, 1);
+    expect_str(die_msg, "7: unknown stream type\n");
+    expect_int(errno, EINVAL);
+
+    old_hook = n_die_set_hook(test_die_hook);
+
+    errno = 0;
+    die_calls = 0;
+    st = n_stream_open(plain, "w", 7 | TN_STREAM_ATOMIC);
+    n_die_set_hook(old_hook);
+    fail_if(st != NULL, "an unknown type was opened atomically");
+    expect_int(die_calls, 1);
+    expect_str(die_msg, "7: unknown stream type\n");
+    expect_int(errno, EINVAL);
+    expect_int(tmp_files(plain), 0);   /* and no temporary file is left */
+
+    old_hook = n_die_set_hook(test_die_hook);
+
+    errno = 0;
+    die_calls = 0;
+    st = n_stream_dopen(-1, "w", TN_STREAM_UNKNOWN);
+    n_die_set_hook(old_hook);
+    fail_if(st != NULL, "n_stream_dopen() accepted an unknown type");
+    expect_int(die_calls, 1);
+    expect_str(die_msg, "0: unknown stream type\n");
+    expect_int(errno, EINVAL);
+
+    /* the old spelling of TN_STREAM_UNKNOWN reaches the same place */
+    old_hook = n_die_set_hook(test_die_hook);
+
+    die_calls = 0;
+    st = n_stream_dopen(-1, "w", -1);
+    n_die_set_hook(old_hook);
+    fail_if(st != NULL, "n_stream_dopen() accepted the old unknown type");
+    expect_int(die_calls, 1);
+    expect_str(die_msg, "0: unknown stream type\n");
 }
 END_TEST
 
@@ -689,6 +1245,12 @@ NTEST_RUNNER("nstream",
             test_close_error,
             test_printf_write_error,
             test_write_error_sets_errno,
+            test_flush_error_sets_errno,
+            test_atomic,
+            test_atomic_sync,
+            test_atomic_abort,
+            test_atomic_mode_and_type,
+            test_atomic_errors,
             test_read_error,
             test_cut_read,
             test_cut_getline,
