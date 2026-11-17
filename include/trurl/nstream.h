@@ -23,15 +23,16 @@
 #endif
 
 /* OR-ed into the type argument of n_stream_open(): the file is written as
-   path.tmpXXXXXX and n_stream_close() renames it into place.  The target
-   keeps the mode of an existing regular file and gets 0666 & ~umask
-   otherwise.  Only "w" is accepted; n_stream_abort() drops the temporary
-   file instead. */
+   path.tmpXXXXXX in the target's directory and n_stream_close() renames it
+   into place, so the target is replaced only by a whole file.  The
+   directory must be writable, unlike for a plain open().  The target keeps
+   the mode of an existing regular file and gets 0666 & ~umask otherwise.
+   Only "w" is accepted. */
 #define TN_STREAM_ATOMIC    (1 << 8)
 
 /* with TN_STREAM_ATOMIC: fsync the new file before the rename and the
    target's directory after it, so that a crash leaves either the old file
-   or the new one on disk.  Each write waits for the device; a failed last
+   or the new one on disk.  The close waits for the device; a failed last
    sync is reported although the file is already replaced. */
 #define TN_STREAM_SYNC      (1 << 9)
 
@@ -69,7 +70,8 @@ tn_stream *n_stream_dopen(int fd, const char *mode, int type);
 
 /* closes the stream; the temporary file of an atomic stream is removed
    instead of renamed.  Aborting a stream that is not atomic is a misuse:
-   n_die() reports it, then the stream is closed.
+   n_die() reports it and aborts, unless a die hook returns - then the
+   stream is closed.
    0, or -1 when the close or the unlink failed */
 int n_stream_abort(tn_stream *st);
 
@@ -189,9 +191,20 @@ long n_stream_tell(tn_stream *st) {
     return st->st_tell(st->stream);
 }
 
+/* a failed flush is a failed write to a later atomic close; gzflush()
+   reports failure through its return value, not always through errno */
 static inline
 int n_stream_flush(tn_stream *st) {
-    return st->st_flush(st->stream);
+    int rc = st->st_flush(st->stream);
+
+    if (rc != 0) {
+        if (errno == 0)
+            errno = EIO;
+        if (st->werr == 0)
+            st->werr = (errno > 0 && errno <= UINT16_MAX) ? errno : EIO;
+    }
+
+    return rc;
 }
 
 /* 0, or -1 when closing failed: what was written may not be in the file;

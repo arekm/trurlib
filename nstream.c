@@ -143,6 +143,7 @@ static tn_stream *n_stream_new(int type, size_t path_size)
         default:
             n_die("%d: unknown stream type\n", type);
             free(st);               /* a n_die() hook may let us return */
+            errno = EINVAL;
             return NULL;
     }
 
@@ -436,10 +437,8 @@ tn_stream *atomic_open(const char *path, const char *mode, int type, int flags)
         return NULL;
     }
 
-    if ((st = n_stream_new(type, len + TMP_SUFFIX_LEN + 1)) == NULL) {
-        errno = ENOMEM;
+    if ((st = n_stream_new(type, len + TMP_SUFFIX_LEN + 1)) == NULL)
         return NULL;
-    }
 
     memcpy(st->path, path, len);
     memcpy(st->path + len, TMP_SUFFIX, TMP_SUFFIX_LEN + 1);
