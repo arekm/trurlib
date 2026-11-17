@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -27,6 +28,7 @@
 #include "nmalloc.h"
 #include "ndie.h"
 #include "niobuf.h"
+#include "nstr.h"
 #define TN_STREAM_USE_GZIO_NG 1
 #include "nstream.h"
 
@@ -52,7 +54,8 @@ void n_stream_zlib_init(tn_stream *st);
 #define TMP_SUFFIX      ".tmpXXXXXX"
 #define TMP_SUFFIX_LEN  (sizeof(TMP_SUFFIX) - 1)
 
-static tn_stream *atomic_open(const char *path, const char *mode, int type);
+static
+tn_stream *atomic_open(const char *path, const char *mode, int type, int flags);
 
 const char *trurl_default_libz()
 {
@@ -196,8 +199,18 @@ tn_stream *n_stream_open(const char *path, const char *mode, int type)
     flags = type & ~TN_STREAM_TYPE_MASK;
     type = stream_type(path, type);
 
+    if (flags & ~(TN_STREAM_ATOMIC | TN_STREAM_SYNC)) {
+        errno = EINVAL;         /* an unknown flag */
+        return NULL;
+    }
+
+    if ((flags & TN_STREAM_SYNC) && (flags & TN_STREAM_ATOMIC) == 0) {
+        errno = EINVAL;         /* there is no rename to make durable */
+        return NULL;
+    }
+
     if (flags & TN_STREAM_ATOMIC)
-        return atomic_open(path, mode, type);
+        return atomic_open(path, mode, type, flags);
 
     if ((st = n_stream_new(type, 0)) == NULL)
         return NULL;
@@ -265,19 +278,68 @@ static int unlink_tmp(const char *path)
     return -1;
 }
 
+static int fsync_retry(int fd)
+{
+    int rc;
+
+    while ((rc = fsync(fd)) != 0 && errno == EINTR)
+        ;
+    return rc;
+}
+
+/* fsync the directory holding target; 0, or the errno of the failure */
+static int sync_dir(const char *target)
+{
+    char *dir = n_strdup(target);
+    const char *dirname = n_dirname(dir);
+    int fd, err = 0;
+
+    if (dirname == NULL)        /* no '/': the current directory */
+        dirname = ".";
+
+    else if (*dirname == '\0')
+        dirname = "/";
+
+    if ((fd = open(dirname, O_RDONLY | O_DIRECTORY)) < 0) {
+        err = errno;
+
+    } else {
+        if (fsync_retry(fd) != 0 && errno != EINVAL && errno != ENOTSUP)
+            err = errno;
+        close(fd);
+    }
+
+    free(dir);
+
+    return err;
+}
+
 /* fchmod, close and rename; on any failure the temporary file goes away and
    the target keeps its old contents */
 static int atomic_close(tn_stream *st)
 {
-    int err = 0;
+    int fd = -1, err = 0;
 
     if (st->werr)               /* the write error is the one to report */
         err = st->werr;
     else if (fchmod(st->fd, st->mode) != 0)  /* 0600 while it was written */
         err = errno;
 
+    /* the descriptor has to outlive st_close(), which writes the trailer of
+       a compressed stream and closes the original */
+    if (err == 0 && (st->flags & TN_STREAM_SYNC)) {
+        if ((fd = dup(st->fd)) < 0)
+            err = errno;
+    }
+
     if (stream_close(st) != 0 && err == 0)
         err = errno;
+
+    if (fd >= 0) {
+        if (err == 0 && fsync_retry(fd) != 0)
+            err = errno;
+        close(fd);
+    }
 
     if (err == 0) {
         size_t len = strlen(st->path);
@@ -286,6 +348,10 @@ static int atomic_close(tn_stream *st)
 
         if (rename(st->path, target) != 0)
             err = errno;
+
+        /* in place now; a crash could still lose the rename */
+        else if (st->flags & TN_STREAM_SYNC)
+            err = sync_dir(target);
         free(target);
     }
 
@@ -357,7 +423,8 @@ static mode_t atomic_mode(const char *path)
     return 0666 & ~mask;
 }
 
-static tn_stream *atomic_open(const char *path, const char *mode, int type)
+static
+tn_stream *atomic_open(const char *path, const char *mode, int type, int flags)
 {
     size_t len = strlen(path);
     tn_stream *st;
@@ -395,7 +462,7 @@ static tn_stream *atomic_open(const char *path, const char *mode, int type)
 
     st->fd = fd;
     st->mode = atomic_mode(path);
-    st->flags |= TN_STREAM_ATOMIC;
+    st->flags |= (uint16_t)flags;
 
     return st;
 }

@@ -29,9 +29,15 @@
    file instead. */
 #define TN_STREAM_ATOMIC    (1 << 8)
 
+/* with TN_STREAM_ATOMIC: fsync the new file before the rename and the
+   target's directory after it, so that a crash leaves either the old file
+   or the new one on disk.  Each write waits for the device; a failed last
+   sync is reported although the file is already replaced. */
+#define TN_STREAM_SYNC      (1 << 9)
+
 struct trurl_stream_private {
     uint8_t  type;
-    uint16_t flags;             /* TN_STREAM_ATOMIC */
+    uint16_t flags;             /* TN_STREAM_ATOMIC, TN_STREAM_SYNC */
     uint16_t werr;              /* errno of a short write, 0 = none */
 
     void  *stream;
