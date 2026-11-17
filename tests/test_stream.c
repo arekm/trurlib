@@ -435,6 +435,29 @@ static void write_content(const char *path, const char *content)
     expect_int(n_stream_close(st), 0);
 }
 
+/* a stream that reads has nothing to flush: the flush and the close succeed */
+static void do_test_flush_read(const char *path)
+{
+    char buf[16];
+    tn_stream *st;
+
+    write_content(path, "abc\n");
+    st = n_stream_open(path, "r", TN_STREAM_UNKNOWN);
+    fail_if(st == NULL, "cannot open %s", path);
+    expect_int(n_stream_read(st, buf, sizeof(buf)), 4);
+    expect_int(n_stream_flush(st), 0);
+    expect_int(n_stream_close(st), 0);
+}
+
+START_TEST(test_flush_read)
+{
+    do_test_flush_read(NTEST_TMPPATH("nstream-flush-read.txt"));
+    do_test_flush_read(NTEST_TMPPATH("nstream-flush-read.gz"));
+    do_test_flush_read(NTEST_TMPPATH("nstream-flush-read.ngz"));
+    do_test_flush_read(NTEST_TMPPATH("nstream-flush-read.zst"));
+}
+END_TEST
+
 static int die_calls;
 static char die_msg[256];
 
@@ -1246,6 +1269,7 @@ NTEST_RUNNER("nstream",
             test_printf_write_error,
             test_write_error_sets_errno,
             test_flush_error_sets_errno,
+            test_flush_read,
             test_atomic,
             test_atomic_sync,
             test_atomic_abort,
