@@ -9,20 +9,31 @@
 
 #include <errno.h>
 #include <stdlib.h>
+#include <sys/types.h>
 
 #include <trurl/n2h.h>
 
 /* type */
-#define TN_STREAM_UNKNOWN -1
-#define TN_STREAM_STDIO    1
-#define TN_STREAM_GZIO     2
-#define TN_STREAM_ZSTDIO   3
+#define TN_STREAM_UNKNOWN   0
+#define TN_STREAM_STDIO     1
+#define TN_STREAM_GZIO      2
+#define TN_STREAM_ZSTDIO    3
 #ifdef TN_STREAM_USE_GZIO_NG
-#define TN_STREAM_GZIO_NG  4
+#define TN_STREAM_GZIO_NG   4
 #endif
 
+/* OR-ed into the type argument of n_stream_open(): the file is written as
+   path.tmpXXXXXX and n_stream_close() renames it into place.  The target
+   keeps the mode of an existing regular file and gets 0666 & ~umask
+   otherwise.  Only "w" is accepted; n_stream_abort() drops the temporary
+   file instead. */
+#define TN_STREAM_ATOMIC    (1 << 8)
+
 struct trurl_stream_private {
-    int   type;
+    uint8_t  type;
+    uint16_t flags;             /* TN_STREAM_ATOMIC */
+    uint16_t werr;              /* errno of a short write, 0 = none */
+
     void  *stream;
     int   fd;
 
@@ -39,12 +50,22 @@ struct trurl_stream_private {
     int   (*st_close)  (void*);
     int   (*_write_hook)(const void*, size_t, void *);
     void   *_write_hook_arg;
-};
 
+    mode_t  mode;               /* atomic: mode the renamed file gets */
+    char    path[];             /* atomic: the temporary name */
+};
 typedef struct trurl_stream_private tn_stream;
 
 tn_stream *n_stream_open(const char *path, const char *mode, int type);
+
+/* TN_STREAM_ATOMIC is EINVAL here: there is no name to rename an fd to */
 tn_stream *n_stream_dopen(int fd, const char *mode, int type);
+
+/* closes the stream; the temporary file of an atomic stream is removed
+   instead of renamed.  Aborting a stream that is not atomic is a misuse:
+   n_die() reports it, then the stream is closed.
+   0, or -1 when the close or the unlink failed */
+int n_stream_abort(tn_stream *st);
 
 static inline
 int n_stream_fdno(tn_stream *st)
@@ -122,8 +143,12 @@ int n_stream_write(tn_stream *st, const void *buf, size_t size) {
             return size;        /* fake write */
 
     n = st->st_write(st->stream, buf, size);
-    if ((size_t)n != size && errno == 0)
-        errno = EIO;            /* gzwrite() reports failure without one */
+    if ((size_t)n != size) {
+        if (errno == 0)
+            errno = EIO;        /* gzwrite() reports failure without one */
+        if (st->werr == 0)
+            st->werr = (errno > 0 && errno <= UINT16_MAX) ? errno : EIO;
+    }
 
     return n;
 }
@@ -163,17 +188,9 @@ int n_stream_flush(tn_stream *st) {
     return st->st_flush(st->stream);
 }
 
-/* 0, or -1 when closing failed: what was written may not be in the file */
-static inline
-int n_stream_close(tn_stream *st) {
-    int rc = 0;
-
-    if (st->stream && st->st_close(st->stream) != 0)
-        rc = -1;
-    st->stream = NULL;
-    free(st);
-    return rc;
-}
+/* 0, or -1 when closing failed: what was written may not be in the file;
+   an atomic stream is renamed into place only when its close succeeded */
+int n_stream_close(tn_stream *st);
 
 int n_stream_guess_type(const char *path);
 

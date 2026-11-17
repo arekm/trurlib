@@ -166,6 +166,8 @@ n_str_vconcat
 n_str_vlen
 n_strdup
 n_strdupl
+n_stream_abort
+n_stream_close
 n_stream_dopen
 n_stream_getline
 n_stream_gets
