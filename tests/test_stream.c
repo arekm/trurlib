@@ -5,6 +5,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <glob.h>
+#include <signal.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -1207,6 +1209,53 @@ START_TEST(test_cut_not)
 }
 END_TEST
 
+/* the close reports a write that failed before it, also when the close
+   writes the rest: the file lacks what that write could not put in.  A
+   write over RLIMIT_FSIZE fails, and the limit is gone at the close.  The
+   data goes in until a write fails, as the buffers of zlib-ng hold all of
+   it compressed; the errno is that write's, EIO where zlib-ng fails a short
+   write without one. */
+static void do_test_write_error_close(const char *path)
+{
+    struct rlimit old, lim;
+    void (*xfsz)(int);
+    tn_stream *st;
+    int i, nw = CUT_SIZE, write_errno, rc, err;
+
+    fill_cut_data(1);
+    st = n_stream_open(path, "w", TN_STREAM_UNKNOWN);
+    fail_if(st == NULL, "cannot create %s", path);
+    fail_if(getrlimit(RLIMIT_FSIZE, &old) != 0, "getrlimit failed");
+    lim = old;
+    lim.rlim_cur = 4096;
+
+    xfsz = signal(SIGXFSZ, SIG_IGN);   /* or it ends the test */
+    fail_if(setrlimit(RLIMIT_FSIZE, &lim) != 0, "setrlimit failed");
+    for (i = 0; i < 64 && nw == CUT_SIZE; i++) {
+        errno = 0;
+        nw = n_stream_write(st, cut_data, CUT_SIZE);
+    }
+    write_errno = errno;
+    fail_if(setrlimit(RLIMIT_FSIZE, &old) != 0, "setrlimit failed");
+    signal(SIGXFSZ, xfsz);
+
+    fail_if(nw == CUT_SIZE, "%s: no write over the limit failed", path);
+    errno = 0;
+    rc = n_stream_close(st);
+    err = errno;
+    expect_int(rc, -1);
+    expect_int(err, write_errno);
+}
+
+START_TEST(test_write_error_close)
+{
+    do_test_write_error_close(NTEST_TMPPATH("nstream-werr-close.txt"));
+    do_test_write_error_close(NTEST_TMPPATH("nstream-werr-close.gz"));
+    do_test_write_error_close(NTEST_TMPPATH("nstream-werr-close.ngz"));
+    do_test_write_error_close(NTEST_TMPPATH("nstream-werr-close.zst"));
+}
+END_TEST
+
 START_TEST(test_printf_format_error)
 {
     do_test_printf_format_error(NTEST_TMPPATH("nstream-printf-err.txt"));
@@ -1270,6 +1319,7 @@ NTEST_RUNNER("nstream",
             test_write_error_sets_errno,
             test_flush_error_sets_errno,
             test_flush_read,
+            test_write_error_close,
             test_atomic,
             test_atomic_sync,
             test_atomic_abort,
