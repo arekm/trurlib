@@ -23,17 +23,14 @@
 #endif
 
 /* OR-ed into the type argument of n_stream_open(): the file is written as
-   path.tmpXXXXXX in the target's directory and n_stream_close() renames it
-   into place, so the target is replaced only by a whole file.  The
-   directory must be writable, unlike for a plain open().  The target keeps
-   the mode of an existing regular file and gets 0666 & ~umask otherwise.
-   Only "w" is accepted. */
+   the hidden .<name>.tmp.XXXXXX next to the target and n_stream_close()
+   renames it into place, so the target is replaced only by a whole file;
+   symlinks, the mode and the owner are handled as by n_atomic_open() (see
+   natomic.h).  Only "w" is accepted. */
 #define TN_STREAM_ATOMIC    (1 << 8)
 
-/* with TN_STREAM_ATOMIC: fsync the new file before the rename and the
-   target's directory after it, so that a crash leaves either the old file
-   or the new one on disk.  The close waits for the device; a failed last
-   sync is reported although the file is already replaced. */
+/* with TN_STREAM_ATOMIC: TN_ATOMIC_SYNC, the new file and its directory
+   are synced */
 #define TN_STREAM_SYNC      (1 << 9)
 
 struct trurl_stream_private {
@@ -58,8 +55,7 @@ struct trurl_stream_private {
     int   (*_write_hook)(const void*, size_t, void *);
     void   *_write_hook_arg;
 
-    mode_t  mode;               /* atomic: mode the renamed file gets */
-    char    path[];             /* atomic: the temporary name */
+    struct trurl_atomic_private *atomic; /* TN_STREAM_ATOMIC, see natomic.h */
 };
 typedef struct trurl_stream_private tn_stream;
 
