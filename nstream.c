@@ -379,10 +379,15 @@ int n_stream_close(tn_stream *st)
 {
     int rc, err = 0;
 
-    if (st->flags & TN_STREAM_ATOMIC)
+    if (st->flags & TN_STREAM_ATOMIC) {
         rc = atomic_close(st);
-    else
+    } else {
         rc = stream_close(st);
+        if (st->werr) {         /* the write error is the one to report */
+            rc = -1;
+            errno = st->werr;
+        }
+    }
 
     if (rc != 0)
         err = errno;

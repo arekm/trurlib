@@ -34,6 +34,7 @@
 struct gz_stream {
     gzFile gz;
     int    err;                 /* the first error of a read, Z_OK if none */
+    int    reading;             /* opened with neither 'w' nor 'a' */
 };
 
 static inline gzFile gz_of(void *stream)
@@ -80,9 +81,15 @@ static char *do_gz_gets(void *stream, char *buf, size_t size)
 }
 
 
+/* 0 for a stream that reads, as from a plain and a zstd stream: gzflush()
+   refuses it, which n_stream_flush() takes for a write that failed */
 static int do_gz_flush(void *stream)
 {
-    return gzflush(gz_of(stream), Z_FULL_FLUSH);
+    struct gz_stream *gs = stream;
+
+    if (gs->reading)
+        return Z_OK;
+    return gzflush(gs->gz, Z_FULL_FLUSH);
 }
 
 static long do_gz_tell(void *stream)
@@ -172,6 +179,7 @@ void *do_gz_open(const char *path, const char *mode)
         return NULL;
     }
 
+    gs->reading = strpbrk(mode, "wa") == NULL;
     return gs;
 }
 
@@ -184,6 +192,7 @@ static void *do_gz_dopen(int fd, const char *mode)
         return NULL;
     }
 
+    gs->reading = strpbrk(mode, "wa") == NULL;
     return gs;
 }
 
