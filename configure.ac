@@ -66,7 +66,7 @@ AC_TYPE_UINT8_T
 AC_FUNC_ALLOCA
 AC_FUNC_MALLOC
 AC_FUNC_REALLOC
-AC_CHECK_FUNCS([memmove memset strchr strrchr strspn])
+AC_CHECK_FUNCS([memmove memset strchr strrchr strspn mkostemp])
 
 dnl unaligned accesses (XXX: todo cross compliation), stolen from libpcap
 case "$host_cpu" in

@@ -97,6 +97,7 @@ libtrurl_la_SOURCES = \
 	xmalloc.c        \
 	nassert.c        \
 	nbuf.c		 \
+	natomic.c        \
 	nstream.c        \
 	nstream_zng.c	 \
 	nstream_z.c	 \
@@ -131,6 +132,7 @@ pkginclude_HEADERS = \
 		include/trurl/ndie.h	   \
 		include/trurl/nmalloc.h    \
 		include/trurl/n_snprintf.h \
+		include/trurl/natomic.h    \
 		include/trurl/nstream.h    \
 		include/trurl/nstore.h     \
 		include/trurl/n2h.h        \

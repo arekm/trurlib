@@ -40,6 +40,11 @@ n_array_unshift
 n_assert_fail
 n_assert_set_hook
 n_assert_sethook
+n_atomic_abort
+n_atomic_commit
+n_atomic_fd
+n_atomic_open
+n_atomic_tmpath
 n_basedirnam
 n_basenam
 n_buf_add
