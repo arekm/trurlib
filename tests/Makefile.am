@@ -10,6 +10,8 @@ TESTS = $(check_PROGRAMS)
 
 # an object taken more times than 16 bits count
 check_PROGRAMS += test_ref
+# a tuple of more elements than 16 bits count
+check_PROGRAMS += test_tuple
 
 #noinst_PROGRAMS = test_hash_func
 #test_hash_func_LDADD = $(top_builddir)/libtrurl.la $(NULL)
