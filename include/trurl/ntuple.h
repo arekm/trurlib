@@ -12,7 +12,7 @@
 #include <trurl/n_obj_ref.h>
 
 typedef struct trurl_tuple_private {
-    uint16_t    _refcnt;
+    uint32_t    _refcnt;
     uint16_t    size;
     void        *data[0];
 } tn_tuple;

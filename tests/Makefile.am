@@ -8,5 +8,8 @@ EXTRA_DIST = test.h
 check_PROGRAMS = test_stream test_atomic test_iobuf test_hash test_list test_str test_array test_buf test_ncheck
 TESTS = $(check_PROGRAMS)
 
+# an object taken more times than 16 bits count
+check_PROGRAMS += test_ref
+
 #noinst_PROGRAMS = test_hash_func
 #test_hash_func_LDADD = $(top_builddir)/libtrurl.la $(NULL)
