@@ -40,12 +40,6 @@ typedef void (*memh) (void);
 
 static memh mem_fail_fn = NULL;
 
-void (*setxmallocs_handler(void (*handler) (void))) (void) {
-    memh tmp = mem_fail_fn;
-    mem_fail_fn = handler;
-    return tmp;
-}
-
 void (*n_malloc_set_failhook(void (*fn) (void)))
 {
     memh tmp = mem_fail_fn;
@@ -60,7 +54,7 @@ static void nomem(void)
     if (mem_fail_fn != NULL)
         mem_fail_fn();
     else
-        printf("Memory exhausted\n");
+        fprintf(stderr, "Memory exhausted\n");
 
     exit(1);
 }
